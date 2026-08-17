@@ -208,6 +208,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   let lastDownloadedUrl = null;
   const DOWNLOAD_BTN_ID = "nobook-global-downloader";
   const MIN_ORIGINAL_IMAGE_AREA = 500 * 500;
+  const MIN_ORIGINAL_SIDE = 500;
 
   const SELECTORS = {
     mediaElements: [
@@ -230,6 +231,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       'div[data-pagelet="ProfilePhoto"]',
       'div[aria-label*="photo"]',
       'div[data-pagelet*="ProfileAppSection"]',
+      'div[data-pagelet^="FeedUnit"]',
       'div[role="article"]'
     ],
     storyIndicators: [
@@ -328,6 +330,27 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     return null;
   };
 
+  const extractAllPlayableVideoUrlsFromPage = () => {
+    const out = [];
+    try {
+      const html = document.documentElement.innerHTML;
+      const seen = new Set();
+      const patterns = [
+        /"browser_native_hd_url":"([^"]+)"/g,
+        /"playable_url_quality_hd":"([^"]+)"/g,
+        /"playable_url":"([^"]+)"/g
+      ];
+      patterns.forEach((re) => {
+        let m;
+        while ((m = re.exec(html)) !== null) {
+          const clean = m[1].replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          if (!seen.has(clean)) { seen.add(clean); out.push(clean); }
+        }
+      });
+    } catch (e) { /* ignore */ }
+    return out;
+  };
+
   const extractOriginalImageUrlFromPage = () => {
     try {
       const html = document.documentElement.innerHTML;
@@ -345,8 +368,8 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
           let uri, w, h;
           if (idx === 0) { h = parseInt(m[1], 10); uri = m[2]; w = parseInt(m[3], 10); }
           else { uri = m[1]; w = parseInt(m[2], 10); h = parseInt(m[3], 10); }
-          const area = (w || 0) * (h || 0);
-          if (area < MIN_ORIGINAL_IMAGE_AREA) continue;
+          if (w < MIN_ORIGINAL_SIDE || h < MIN_ORIGINAL_SIDE) continue;
+          const area = w * h;
           if (area > bestArea) { bestArea = area; best = uri; }
         }
       });
@@ -354,6 +377,31 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       if (best) return best.replace(/\\\//g, '/').replace(/\\u0025/g, '%');
     } catch (e) { /* ignore */ }
     return null;
+  };
+
+  const extractAllOriginalImageUrlsFromPage = () => {
+    const out = [];
+    try {
+      const html = document.documentElement.innerHTML;
+      const seen = new Set();
+      const patternsOrdered = [
+        /"image":\{"height":(\d+),"uri":"([^"]+)","width":(\d+)\}/g,
+        /"image":\{"uri":"([^"]+)","width":(\d+),"height":(\d+)\}/g
+      ];
+      patternsOrdered.forEach((re, idx) => {
+        let m;
+        while ((m = re.exec(html)) !== null) {
+          let uri, w, h;
+          if (idx === 0) { h = parseInt(m[1], 10); uri = m[2]; w = parseInt(m[3], 10); }
+          else { uri = m[1]; w = parseInt(m[2], 10); h = parseInt(m[3], 10); }
+          if (w < MIN_ORIGINAL_SIDE || h < MIN_ORIGINAL_SIDE) continue;
+          const clean = uri.replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          const area = w * h;
+          if (!seen.has(clean)) { seen.add(clean); out.push({ url: clean, area: area }); }
+        }
+      });
+    } catch (e) { /* ignore */ }
+    return out.sort((a, b) => b.area - a.area);
   };
 
   const getBestImageSource = (imgEl) => {
@@ -410,11 +458,11 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   const downloadMedia = (url) => {
     if (!url || url.indexOf("blob:") === 0) {
       console.error("[Nobook] Cannot download blob/empty URL directly:", url);
-      return;
+      return Promise.resolve();
     }
-    fetch(url)
+    return fetch(url)
       .then(response => response.blob())
-      .then(blob => {
+      .then(blob => new Promise((resolve) => {
         if (window.DownloadBridge && window.DownloadBridge.downloadBase64File) {
           const reader = new FileReader();
           reader.onloadend = function() {
@@ -424,87 +472,192 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
                 blob.type || "image/jpeg"
               );
             }
+            resolve();
           };
           reader.readAsDataURL(blob);
+        } else {
+          resolve();
         }
-      })
+      }))
       .catch(err => {
         console.error("Error downloading media:", err);
       });
   };
 
+  // Sequential batch queue: fetch -> base64 -> DownloadBridge, 400ms apart
+  // to avoid RAM/I-O contention when the user downloads a whole album.
+  const downloadAllSequentially = (urls) => {
+    let i = 0;
+    const next = () => {
+      if (i >= urls.length) return;
+      const url = stripFacebookCdnParams(urls[i]);
+      i += 1;
+      downloadMedia(url).then(() => setTimeout(next, 400));
+    };
+    next();
+  };
+
+  const collectPostMediaUrls = (container) => {
+    const urls = [];
+    if (!container) return urls;
+
+    const videos = Array.from(container.querySelectorAll("video"));
+    const relayVideos = extractAllPlayableVideoUrlsFromPage();
+    videos.forEach((v, idx) => {
+      const best = getBestVideoSource(v) || relayVideos[idx] || null;
+      if (best) urls.push(best);
+    });
+
+    const images = Array.from(container.querySelectorAll('img[src*="fbcdn"]'))
+      .filter(img => isElementVisible(img) && isLargeEnough(img));
+    if (images.length > 0) {
+      images.forEach(img => urls.push(getBestImageSource(img)));
+    } else {
+      extractAllOriginalImageUrlsFromPage().forEach(entry => urls.push(entry.url));
+    }
+
+    return Array.from(new Set(urls.filter(Boolean)));
+  };
+
+  const MODAL_ID = "nobook-album-choice-modal";
+
+  const closeAlbumModal = () => {
+    const el = document.getElementById(MODAL_ID);
+    if (el) el.remove();
+  };
+
+  const showAlbumChoiceModal = (mediaCount, downloadCurrent, downloadAll) => {
+    closeAlbumModal();
+
+    const overlay = document.createElement("div");
+    overlay.id = MODAL_ID;
+    overlay.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:999999;" +
+      "display:flex;align-items:center;justify-content:center;";
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeAlbumModal(); });
+
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:#1c1c1e;color:#fff;border-radius:14px;padding:20px;" +
+      "max-width:320px;width:88%;box-shadow:0 8px 24px rgba(0,0,0,0.4);" +
+      "font-family:sans-serif;position:relative;";
+
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "\u00D7";
+    closeBtn.setAttribute("aria-label", "Dong");
+    closeBtn.style.cssText =
+      "position:absolute;top:8px;right:10px;background:none;border:none;" +
+      "color:#aaa;font-size:20px;cursor:pointer;line-height:1;";
+    closeBtn.addEventListener("click", closeAlbumModal);
+
+    const title = document.createElement("div");
+    title.textContent = "Phat hien bai viet co " + mediaCount + " anh/video";
+    title.style.cssText = "font-size:15px;font-weight:600;margin:4px 24px 16px 0;";
+
+    const btnCurrent = document.createElement("button");
+    btnCurrent.textContent = "Tai anh/video dang xem (Ban goc)";
+    btnCurrent.style.cssText =
+      "display:block;width:100%;padding:11px;margin-bottom:8px;border:none;" +
+      "border-radius:8px;background:#3a3a3c;color:#fff;font-size:13px;cursor:pointer;";
+    btnCurrent.addEventListener("click", () => { closeAlbumModal(); downloadCurrent(); });
+
+    const btnAll = document.createElement("button");
+    btnAll.textContent = "Tai toan bo Album (" + mediaCount + " tep goc)";
+    btnAll.style.cssText =
+      "display:block;width:100%;padding:11px;border:none;border-radius:8px;" +
+      "background:rgba(24,119,242,0.95);color:#fff;font-size:13px;cursor:pointer;";
+    btnAll.addEventListener("click", () => { closeAlbumModal(); downloadAll(); });
+
+    box.appendChild(closeBtn);
+    box.appendChild(title);
+    box.appendChild(btnCurrent);
+    box.appendChild(btnAll);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  };
+
   const extractAndDownloadMedia = () => {
     const mediaElement = getCurrentMediaElement();
+    const postContainer = mediaElement ? findContentContainer(mediaElement) : currentContentContainer;
+    const albumUrls = postContainer ? collectPostMediaUrls(postContainer) : [];
 
-    if (mediaElement && mediaElement.tagName === "VIDEO") {
-      const bestUrl = getBestVideoSource(mediaElement);
-      if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; }
-      return;
-    }
-
-    if (mediaElement && mediaElement.src) {
-      const bestImgUrl = getBestImageSource(mediaElement);
-      downloadMedia(bestImgUrl);
-      lastDownloadedUrl = bestImgUrl;
-      return;
-    }
-
-    const container = currentContentContainer || document.body;
-
-    const videoElement = container.querySelector("video:not([hidden])");
-    if (videoElement) {
-      const bestUrl = getBestVideoSource(videoElement);
-      if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; return; }
-    }
-
-    const images = Array.from(container.querySelectorAll("img"))
-      .filter(img =>
-        img.src &&
-        !img.src.includes("data:image") &&
-        img.src !== lastDownloadedUrl
-      )
-      .filter(img => isElementVisible(img) && isLargeEnough(img))
-      .sort((a, b) => {
-        const areaA = a.getBoundingClientRect().width * a.getBoundingClientRect().height;
-        const areaB = b.getBoundingClientRect().width * b.getBoundingClientRect().height;
-        return areaB - areaA;
-      });
-
-    if (images.length > 0) {
-      const bestImgUrl = getBestImageSource(images[0]);
-      downloadMedia(bestImgUrl);
-      lastDownloadedUrl = bestImgUrl;
-      return;
-    }
-
-    const backgroundElements = Array.from(container.querySelectorAll("*"));
-
-    for (const el of backgroundElements) {
-      const style = window.getComputedStyle(el);
-      const bgImage = style.backgroundImage;
-
-      if (
-        bgImage &&
-        bgImage !== "none" &&
-        (bgImage.includes("fbcdn.net") || bgImage.includes("fbsbx.com"))
-      ) {
-        const imageUrl = stripFacebookCdnParams(
-          bgImage.replace(/^url\(['"](.+)['"]\)$/, "$1")
-        );
-        downloadMedia(imageUrl);
-        lastDownloadedUrl = imageUrl;
+    const downloadCurrentSingle = () => {
+      if (mediaElement && mediaElement.tagName === "VIDEO") {
+        const bestUrl = getBestVideoSource(mediaElement);
+        if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; }
         return;
       }
-    }
+      if (mediaElement && mediaElement.src) {
+        const bestImgUrl = getBestImageSource(mediaElement);
+        downloadMedia(bestImgUrl);
+        lastDownloadedUrl = bestImgUrl;
+        return;
+      }
 
-    const fallback = extractPlayableUrlFromPage() || extractOriginalImageUrlFromPage();
-    if (fallback) {
-      downloadMedia(stripFacebookCdnParams(fallback));
-      lastDownloadedUrl = fallback;
+      const container = currentContentContainer || document.body;
+      const videoElement = container.querySelector("video:not([hidden])");
+      if (videoElement) {
+        const bestUrl = getBestVideoSource(videoElement);
+        if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; return; }
+      }
+
+      const images = Array.from(container.querySelectorAll("img"))
+        .filter(img =>
+          img.src &&
+          !img.src.includes("data:image") &&
+          img.src !== lastDownloadedUrl
+        )
+        .filter(img => isElementVisible(img) && isLargeEnough(img))
+        .sort((a, b) => {
+          const areaA = a.getBoundingClientRect().width * a.getBoundingClientRect().height;
+          const areaB = b.getBoundingClientRect().width * b.getBoundingClientRect().height;
+          return areaB - areaA;
+        });
+
+      if (images.length > 0) {
+        const bestImgUrl = getBestImageSource(images[0]);
+        downloadMedia(bestImgUrl);
+        lastDownloadedUrl = bestImgUrl;
+        return;
+      }
+
+      const backgroundElements = Array.from(container.querySelectorAll("*"));
+      for (const el of backgroundElements) {
+        const style = window.getComputedStyle(el);
+        const bgImage = style.backgroundImage;
+        if (
+          bgImage && bgImage !== "none" &&
+          (bgImage.includes("fbcdn.net") || bgImage.includes("fbsbx.com"))
+        ) {
+          const imageUrl = stripFacebookCdnParams(
+            bgImage.replace(/^url\(['"](.+)['"]\)$/, "$1")
+          );
+          downloadMedia(imageUrl);
+          lastDownloadedUrl = imageUrl;
+          return;
+        }
+      }
+
+      const fallback = extractPlayableUrlFromPage() || extractOriginalImageUrlFromPage();
+      if (fallback) {
+        downloadMedia(stripFacebookCdnParams(fallback));
+        lastDownloadedUrl = fallback;
+        return;
+      }
+
+      debugLog("No media content found to download");
+    };
+
+    if (albumUrls.length >= 2) {
+      showAlbumChoiceModal(
+        albumUrls.length,
+        downloadCurrentSingle,
+        () => downloadAllSequentially(albumUrls)
+      );
       return;
     }
 
-    debugLog("No media content found to download");
+    downloadCurrentSingle();
   };
 
   const createDownloadButton = () => {
