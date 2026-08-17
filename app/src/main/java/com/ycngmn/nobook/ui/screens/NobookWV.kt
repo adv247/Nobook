@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.WebSettings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
@@ -206,6 +207,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   let currentContentContainer = null;
   let lastDownloadedUrl = null;
   const DOWNLOAD_BTN_ID = "nobook-global-downloader";
+  const MIN_ORIGINAL_IMAGE_AREA = 500 * 500;
 
   const SELECTORS = {
     mediaElements: [
@@ -295,6 +297,18 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     });
   };
 
+  const stripFacebookCdnParams = (url) => {
+    try {
+      const u = new URL(url, window.location.href);
+      if (/\.fbcdn\.net$/i.test(u.hostname) || /\.fbsbx\.com$/i.test(u.hostname) ||
+          u.hostname === "fbcdn.net" || u.hostname === "fbsbx.com") {
+        u.searchParams.delete("stp");
+        return u.toString();
+      }
+    } catch (e) { /* ignore */ }
+    return url;
+  };
+
   const extractPlayableUrlFromPage = () => {
     try {
       const html = document.documentElement.innerHTML;
@@ -332,6 +346,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
           if (idx === 0) { h = parseInt(m[1], 10); uri = m[2]; w = parseInt(m[3], 10); }
           else { uri = m[1]; w = parseInt(m[2], 10); h = parseInt(m[3], 10); }
           const area = (w || 0) * (h || 0);
+          if (area < MIN_ORIGINAL_IMAGE_AREA) continue;
           if (area > bestArea) { bestArea = area; best = uri; }
         }
       });
@@ -342,33 +357,36 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   };
 
   const getBestImageSource = (imgEl) => {
+    let best = null;
     try {
       if (imgEl.srcset) {
         const candidates = imgEl.srcset.split(',')
-          .map(s => s.trim().split(/\\s+/))
+          .map(s => s.trim().split(/\s+/))
           .filter(p => p[0]);
-        let best = null, bestW = -1;
+        let bestW = -1;
         candidates.forEach(([srcUrl, size]) => {
           const w = parseInt((size || '').replace('w', ''), 10) || 0;
           if (w > bestW) { bestW = w; best = srcUrl; }
         });
-        if (best) return best;
       }
     } catch (e) { /* ignore */ }
 
     const current = imgEl.currentSrc || imgEl.src;
     const fromPage = extractOriginalImageUrlFromPage();
-    if (fromPage && fromPage !== current) return fromPage;
-    return current;
+    const chosen = fromPage || best || current;
+    return stripFacebookCdnParams(chosen);
   };
 
   const getBestVideoSource = (videoElement) => {
+    const fromRelay = extractPlayableUrlFromPage();
+    if (fromRelay) return fromRelay;
+
     try {
       const sources = Array.from(videoElement.querySelectorAll("source"))
         .map(s => ({
           url: s.src,
           width: parseInt(s.getAttribute("data-width") || s.getAttribute("width") || "0", 10),
-          bitrateMatch: (s.src.match(/[?&](?:br|bitrate|vencode_tag)=(\\d+)/) || [])[1]
+          bitrateMatch: (s.src.match(/[?&](?:br|bitrate|vencode_tag)=(\d+)/) || [])[1]
         }))
         .filter(s => s.url);
 
@@ -384,8 +402,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
     const candidate = videoElement.currentSrc || videoElement.src;
     if (!candidate || candidate.indexOf("blob:") === 0) {
-      const fallback = extractPlayableUrlFromPage();
-      if (fallback) return fallback;
+      return null;
     }
     return candidate;
   };
@@ -421,8 +438,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
     if (mediaElement && mediaElement.tagName === "VIDEO") {
       const bestUrl = getBestVideoSource(mediaElement);
-      downloadMedia(bestUrl);
-      lastDownloadedUrl = bestUrl;
+      if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; }
       return;
     }
 
@@ -438,9 +454,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     const videoElement = container.querySelector("video:not([hidden])");
     if (videoElement) {
       const bestUrl = getBestVideoSource(videoElement);
-      downloadMedia(bestUrl);
-      lastDownloadedUrl = bestUrl;
-      return;
+      if (bestUrl) { downloadMedia(bestUrl); lastDownloadedUrl = bestUrl; return; }
     }
 
     const images = Array.from(container.querySelectorAll("img"))
@@ -474,7 +488,9 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         bgImage !== "none" &&
         (bgImage.includes("fbcdn.net") || bgImage.includes("fbsbx.com"))
       ) {
-        const imageUrl = bgImage.replace(/^url\\(['"](.+)['"]\\)$/, "$1");
+        const imageUrl = stripFacebookCdnParams(
+          bgImage.replace(/^url\(['"](.+)['"]\)$/, "$1")
+        );
         downloadMedia(imageUrl);
         lastDownloadedUrl = imageUrl;
         return;
@@ -483,7 +499,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
     const fallback = extractPlayableUrlFromPage() || extractOriginalImageUrlFromPage();
     if (fallback) {
-      downloadMedia(fallback);
+      downloadMedia(stripFacebookCdnParams(fallback));
       lastDownloadedUrl = fallback;
       return;
     }
@@ -565,7 +581,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       const flAcDiv = button.querySelector('div.fl.ac');
       if (flAcDiv) {
         const span = flAcDiv.querySelector('span');
-        if (span && span.textContent.includes('\\u{F196C}')) {
+        if (span && span.textContent.includes('\u{F196C}')) {
           button.style.display = 'none';
         }
       }
@@ -710,7 +726,7 @@ private const val LINK_CLEANER_SCRIPT = """
     function unwrapFacebookRedirect(urlStr) {
       try {
         var u = new URL(urlStr, window.location.href);
-        if (/(^|\\.)facebook\\.com$/.test(u.hostname) && u.pathname === '/l.php') {
+        if (/(^|\.)facebook\.com$/.test(u.hostname) && u.pathname === '/l.php') {
           var target = u.searchParams.get('u');
           if (target) return decodeURIComponent(target);
         }
@@ -819,9 +835,9 @@ private const val TEXT_SELECTION_SCRIPT = """
       walk(root);
       if (current.trim().length > 0) lines.push(current);
       return lines
-        .map(function (l) { return l.replace(/[ \\t]+/g, ' ').trim(); })
+        .map(function (l) { return l.replace(/[ \t]+/g, ' ').trim(); })
         .filter(function (l) { return l.length > 0; })
-        .join('\\n\\n');
+        .join('\n\n');
     }
 
     function findMainTextContainer(start) {
@@ -937,7 +953,7 @@ private const val CONTRAST_GUARD_SCRIPT = """
     window.__nobookContrastGuardActive = true;
 
     function luminance(rgb) {
-      var m = rgb.match(/\\d+/g);
+      var m = rgb.match(/\d+/g);
       if (!m || m.length < 3) return null;
       var r = m[0] / 255, g = m[1] / 255, b = m[2] / 255;
       return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -1180,9 +1196,9 @@ private const val NETWORK_SANITIZER_SCRIPT = """
     ];
 
     var BLOCKED_NETWORK_PATTERNS = [
-      /an\\.facebook\\.com/,
-      /pixel\\.facebook\\.com/,
-      /graph\\.facebook\\.com\\/v\\d+\\/\\d+\\/activities/,
+      /an\.facebook\.com/,
+      /pixel\.facebook\.com/,
+      /graph\.facebook\.com\/v\d+\/\d+\/activities/,
       /audience_network/
     ];
 
