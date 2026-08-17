@@ -33,6 +33,9 @@ import androidx.core.graphics.ColorUtils
 import androidx.core.net.toUri
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.multiplatform.webview.web.LoadingState
 import com.multiplatform.webview.web.WebView
@@ -135,13 +138,6 @@ private val MONETIZED_SHORTLINK_HOSTS = setOf(
     "vt.tiktok.com", "vm.tiktok.com"
 )
 
-/**
- * True if [url]'s host is a known Shopee/Lazada/TikTok short-link redirector.
- * These embed the affiliate/tracking code directly in the URL *path*
- * (e.g. s.shopee.vn/AbCd1234), so stripping query params alone does not
- * remove the monetized attribution -- the short code itself must be
- * resolved server-side to discover the real destination.
- */
 private fun isMonetizedShortLink(url: String): Boolean {
     return runCatching {
         val host = Uri.parse(url).host?.lowercase() ?: return false
@@ -149,12 +145,6 @@ private fun isMonetizedShortLink(url: String): Boolean {
     }.getOrDefault(false)
 }
 
-/**
- * Follows HTTP redirects (HEAD requests, no cookies/session attached) up to
- * [maxHops] times to discover the true final destination of a short link,
- * fully removing any affiliate/tracking code embedded in the short path.
- * Must be called off the main thread.
- */
 private fun resolveFinalUrl(startUrl: String, maxHops: Int = 5): String {
     var current = startUrl
     repeat(maxHops) {
@@ -182,9 +172,7 @@ private fun resolveFinalUrl(startUrl: String, maxHops: Int = 5): String {
     return current
 }
 
-private val DEFAULT_SITE_BLOCKLIST = setOf<String>(
-    // Them domain (khong can http/https) vao day de mo rong blocklist tuy chinh.
-)
+private val DEFAULT_SITE_BLOCKLIST = setOf<String>()
 
 private fun isBlockedSite(url: String): Boolean {
     if (DEFAULT_SITE_BLOCKLIST.isEmpty()) return false
@@ -519,7 +507,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
   const createDownloadButton = () => {
     const css = `
-      #${'$'}{DOWNLOAD_BTN_ID} {
+      #${DOWNLOAD_BTN_ID} {
         position: fixed;
         top: 70px;
         right: 15px;
@@ -528,7 +516,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         background-color: rgba(0, 0, 0, 0.7);
         color: white;
         border-radius: 50%;
-        z-index: ${'$'}{CONFIG.buttonZIndex};
+        z-index: ${CONFIG.buttonZIndex};
         border: none;
         display: none;
         align-items: center;
@@ -541,7 +529,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         background-position: center;
         background-size: 24px;
       }
-      #${'$'}{DOWNLOAD_BTN_ID}.visible {
+      #${DOWNLOAD_BTN_ID}.visible {
         display: flex !important;
       }
     `;
@@ -1259,6 +1247,75 @@ private const val NETWORK_SANITIZER_SCRIPT = """
 })();
 """
 
+private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookPerformanceOptActive) return;
+    window.__nobookPerformanceOptActive = true;
+
+    var CULL_CSS = `
+      div[role="article"], div[data-pagelet^="FeedUnit"] {
+        content-visibility: auto;
+        contain-intrinsic-size: 600px 400px;
+      }
+    `;
+    var style = document.createElement('style');
+    style.setAttribute('data-nobook-perf', '1');
+    style.textContent = CULL_CSS;
+    document.head.appendChild(style);
+
+    var observedVideos = new WeakSet();
+
+    var handleIntersections = function (entries) {
+      entries.forEach(function (entry) {
+        var video = entry.target;
+        if (entry.isIntersecting && entry.intersectionRatio > 0.25) {
+          if (video.hasAttribute('data-nobook-paused')) {
+            video.removeAttribute('data-nobook-paused');
+            video.preload = 'auto';
+            if (video.dataset.nobookWasPlaying === '1') {
+              var p = video.play();
+              if (p && typeof p.catch === 'function') p.catch(function () {});
+            }
+          }
+        } else {
+          if (!video.paused) {
+            video.dataset.nobookWasPlaying = '1';
+            video.pause();
+          } else {
+            video.dataset.nobookWasPlaying = '0';
+          }
+          video.setAttribute('data-nobook-paused', '1');
+          video.preload = 'none';
+        }
+      });
+    };
+
+    var io = new IntersectionObserver(handleIntersections, {
+      root: null,
+      rootMargin: '200px 0px',
+      threshold: [0, 0.25, 0.5]
+    });
+
+    var observeVideos = function () {
+      document.querySelectorAll('video').forEach(function (v) {
+        if (observedVideos.has(v)) return;
+        observedVideos.add(v);
+        io.observe(v);
+      });
+    };
+
+    observeVideos();
+    var mo = new MutationObserver(function () { observeVideos(); });
+    mo.observe(document.body, { childList: true, subtree: true });
+
+    console.info('[Nobook] Performance optimization (DOM culling + video IntersectionObserver) active');
+  } catch (err) {
+    console.error('[Nobook] Performance optimization injection failed:', err);
+  }
+})();
+"""
+
 @Composable
 fun NobookWebView(
     url: String,
@@ -1267,6 +1324,7 @@ fun NobookWebView(
     val context = LocalContext.current
     val activity = LocalActivity.current
     val resources = LocalResources.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -1498,6 +1556,12 @@ fun NobookWebView(
         }
     }
 
+    LaunchedEffect(loadingState) {
+        if (loadingState is LoadingState.Finished) {
+            navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
+        }
+    }
+
     if (isError && isLoading) {
         NetworkErrorDialog { activity?.finish() }
         return
@@ -1557,6 +1621,33 @@ fun NobookWebView(
     LaunchedEffect(isDesktop) {
         val userAgent = if (isDesktop) DESKTOP_USER_AGENT else ""
         state.nativeWebView.settings.userAgentString = userAgent
+    }
+
+    // Pause/resume the WebView's rendering, JS timers and media playback
+    // when the app goes to background/foreground, to avoid wasting CPU,
+    // battery and network while Nobook is not visible to the user.
+    DisposableEffect(lifecycleOwner, state) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    runCatching {
+                        state.nativeWebView.onPause()
+                        state.nativeWebView.pauseTimers()
+                    }
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    runCatching {
+                        state.nativeWebView.onResume()
+                        state.nativeWebView.resumeTimers()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // needed to consume extra padding when keyboard is open
