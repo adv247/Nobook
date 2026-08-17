@@ -213,36 +213,34 @@ private object VideoPlaybackBridge {
 
 private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 /*
-* Script to add a global download button for any visible video/image on
-* Facebook (feed, stories, reels, highlights, photo viewer). Extracts the
-* true original/HD quality media (Relay JSON payload > HTML5
-* source/srcset parsing > rendered src fallback), strips lossy Facebook
-* CDN compression params (stp=) and refuses to hand blob: URLs to the
-* download pipeline. When the post containing the tapped media has 2+
-* valid images/videos (an album/grid), a lightweight modal lets the user
-* choose between downloading just the media currently in view or the
-* whole album as a sequential batch queue (400ms spacing between fetches
-* to avoid RAM/I-O contention).
-*
-* Album collection is scoped strictly to the tapped post's own container
-* (never the whole document via innerHTML scanning), capped at
-* MAX_ALBUM_ITEMS, and filtered by minimum rendered/intrinsic size so
-* profile icons, reaction glyphs and unrelated feed thumbnails can never
-* leak into the batch. This replaces the previous standalone "ALL" button,
-* which scanned the page's entire embedded JSON and could pull media
-* belonging to a different post into the download queue.
-*
-* Size checks use intrinsic media dimensions (videoWidth/naturalWidth) in
-* addition to the rendered CSS rect, because Desktop layout mode renders
-* Facebook at desktop CSS width inside a phone-sized viewport, shrinking
-* on-screen rect sizes well below fixed pixel thresholds even though the
-* media is fully visible.
-*
-* Polling via setInterval was removed: processPage() is now driven by the
-* shared MASTER_LOOP_SCRIPT (requestIdleCallback) plus a MutationObserver
-* for structural DOM changes, to avoid choking the JS main thread.
-* Original Author: @YeiversonYurgaky
-*/
+ * Script to add a global download button for any visible video/image on
+ * Facebook (feed, stories, reels, highlights, photo viewer). Extracts the
+ * true original/HD quality media (Relay JSON payload > HTML5
+ * source/srcset parsing > rendered src fallback), strips lossy Facebook
+ * CDN compression params (stp=) and refuses to hand blob: URLs to the
+ * download pipeline. When the post containing the tapped media has 2+
+ * valid images/videos (an album/grid), a lightweight modal lets the user
+ * choose between downloading just the media currently in view or the
+ * whole album as a sequential batch queue (400ms spacing between fetches
+ * to avoid RAM/I-O contention).
+ *
+ * Album collection is scoped strictly to the tapped post's own container
+ * (never the whole document via innerHTML scanning), capped at
+ * MAX_ALBUM_ITEMS, and filtered by minimum rendered/intrinsic size so
+ * profile icons, reaction glyphs and unrelated feed thumbnails can never
+ * leak into the batch.
+ *
+ * Size checks use intrinsic media dimensions (videoWidth/naturalWidth) in
+ * addition to the rendered CSS rect, because Desktop layout mode renders
+ * Facebook at desktop CSS width inside a phone-sized viewport, shrinking
+ * on-screen rect sizes well below fixed pixel thresholds even though the
+ * media is fully visible.
+ *
+ * Polling via setInterval was removed: processPage() is now driven by the
+ * shared MASTER_LOOP_SCRIPT (requestIdleCallback) plus a MutationObserver
+ * for structural DOM changes, to avoid choking the JS main thread.
+ * Original Author: @YeiversonYurgaky
+ */
 (function() {
 const CONFIG = {
 buttonZIndex: 999999,
@@ -673,7 +671,7 @@ downloadCurrentSingle();
 
 const createDownloadButton = () => {
 const css = `
-#${DOWNLOAD_BTN_ID} {
+#${'$'}{DOWNLOAD_BTN_ID} {
 position: fixed;
 top: 70px;
 right: 15px;
@@ -682,7 +680,7 @@ height: 40px;
 background-color: rgba(0, 0, 0, 0.7);
 color: white;
 border-radius: 50%;
-z-index: ${CONFIG.buttonZIndex};
+z-index: ${'$'}{CONFIG.buttonZIndex};
 border: none;
 display: none;
 align-items: center;
@@ -695,7 +693,7 @@ background-repeat: no-repeat;
 background-position: center;
 background-size: 24px;
 }
-#${DOWNLOAD_BTN_ID}.visible {
+#${'$'}{DOWNLOAD_BTN_ID}.visible {
 display: flex !important;
 }
 `;
