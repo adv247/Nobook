@@ -196,7 +196,21 @@ private fun isMessengerWebPath(url: String): Boolean {
         lower.contains("/direct/inbox")
 }
 
+
 private const val STORY_REEL_DOWNLOADER_SCRIPT = """
+/*
+ * Script to add a global download button for any visible video/image on
+ * Facebook (feed, stories, reels, highlights, photo viewer). Extracts the
+ * true original/HD quality media (Relay JSON payload > HTML5
+ * source/srcset parsing > rendered src fallback), strips lossy Facebook
+ * CDN compression params (stp=) and refuses to hand blob: URLs to the
+ * download pipeline. When the post containing the tapped media has 2+
+ * valid images/videos (an album/grid), a lightweight modal lets the user
+ * choose between downloading just the media currently in view or the
+ * whole album as a sequential batch queue (400ms spacing between fetches
+ * to avoid RAM/I-O contention).
+ * Original Author: @YeiversonYurgaky
+ */
 (function() {
   const CONFIG = {
     buttonZIndex: 999999,
@@ -323,7 +337,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       for (const p of patterns) {
         const m = html.match(p);
         if (m && m[1]) {
-          return m[1].replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          return m[1].replace(/\\\\\\//g, '/').replace(/\\\\u0025/g, '%');
         }
       }
     } catch (e) { /* ignore */ }
@@ -343,7 +357,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       patterns.forEach((re) => {
         let m;
         while ((m = re.exec(html)) !== null) {
-          const clean = m[1].replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          const clean = m[1].replace(/\\\\\\//g, '/').replace(/\\\\u0025/g, '%');
           if (!seen.has(clean)) { seen.add(clean); out.push(clean); }
         }
       });
@@ -358,8 +372,8 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       let bestArea = -1;
 
       const patternsOrdered = [
-        /"image":\{"height":(\d+),"uri":"([^"]+)","width":(\d+)\}/g,
-        /"image":\{"uri":"([^"]+)","width":(\d+),"height":(\d+)\}/g
+        /"image":\\{"height":(\\d+),"uri":"([^"]+)","width":(\\d+)\\}/g,
+        /"image":\\{"uri":"([^"]+)","width":(\\d+),"height":(\\d+)\\}/g
       ];
 
       patternsOrdered.forEach((re, idx) => {
@@ -374,7 +388,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         }
       });
 
-      if (best) return best.replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+      if (best) return best.replace(/\\\\\\//g, '/').replace(/\\\\u0025/g, '%');
     } catch (e) { /* ignore */ }
     return null;
   };
@@ -385,8 +399,8 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       const html = document.documentElement.innerHTML;
       const seen = new Set();
       const patternsOrdered = [
-        /"image":\{"height":(\d+),"uri":"([^"]+)","width":(\d+)\}/g,
-        /"image":\{"uri":"([^"]+)","width":(\d+),"height":(\d+)\}/g
+        /"image":\\{"height":(\\d+),"uri":"([^"]+)","width":(\\d+)\\}/g,
+        /"image":\\{"uri":"([^"]+)","width":(\\d+),"height":(\\d+)\\}/g
       ];
       patternsOrdered.forEach((re, idx) => {
         let m;
@@ -395,7 +409,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
           if (idx === 0) { h = parseInt(m[1], 10); uri = m[2]; w = parseInt(m[3], 10); }
           else { uri = m[1]; w = parseInt(m[2], 10); h = parseInt(m[3], 10); }
           if (w < MIN_ORIGINAL_SIDE || h < MIN_ORIGINAL_SIDE) continue;
-          const clean = uri.replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          const clean = uri.replace(/\\\\\\//g, '/').replace(/\\\\u0025/g, '%');
           const area = w * h;
           if (!seen.has(clean)) { seen.add(clean); out.push({ url: clean, area: area }); }
         }
@@ -409,7 +423,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     try {
       if (imgEl.srcset) {
         const candidates = imgEl.srcset.split(',')
-          .map(s => s.trim().split(/\s+/))
+          .map(s => s.trim().split(/\\s+/))
           .filter(p => p[0]);
         let bestW = -1;
         candidates.forEach(([srcUrl, size]) => {
@@ -434,7 +448,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         .map(s => ({
           url: s.src,
           width: parseInt(s.getAttribute("data-width") || s.getAttribute("width") || "0", 10),
-          bitrateMatch: (s.src.match(/[?&](?:br|bitrate|vencode_tag)=(\d+)/) || [])[1]
+          bitrateMatch: (s.src.match(/[?&](?:br|bitrate|vencode_tag)=(\\d+)/) || [])[1]
         }))
         .filter(s => s.url);
 
@@ -543,7 +557,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       "font-family:sans-serif;position:relative;";
 
     const closeBtn = document.createElement("button");
-    closeBtn.textContent = "\u00D7";
+    closeBtn.textContent = "\\u00D7";
     closeBtn.setAttribute("aria-label", "Dong");
     closeBtn.style.cssText =
       "position:absolute;top:8px;right:10px;background:none;border:none;" +
@@ -630,7 +644,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
           (bgImage.includes("fbcdn.net") || bgImage.includes("fbsbx.com"))
         ) {
           const imageUrl = stripFacebookCdnParams(
-            bgImage.replace(/^url\(['"](.+)['"]\)$/, "$1")
+            bgImage.replace(/^url\\(['"](.+)['"]\\)$/, "$1")
           );
           downloadMedia(imageUrl);
           lastDownloadedUrl = imageUrl;
@@ -734,7 +748,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       const flAcDiv = button.querySelector('div.fl.ac');
       if (flAcDiv) {
         const span = flAcDiv.querySelector('span');
-        if (span && span.textContent.includes('\u{F196C}')) {
+        if (span && span.textContent.includes('\\u{F196C}')) {
           button.style.display = 'none';
         }
       }
@@ -821,6 +835,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   }
 })();
 """
+
 
 private const val MESSENGER_GUARD_SCRIPT = """
 (function () {
@@ -1246,10 +1261,10 @@ private const val SPONSORED_VI_SCRIPT = """
     window.__nobookSponsoredViActive = true;
 
     var VI_SPONSORED_KEYWORDS = [
-      'được tài trợ',
+      '\u0111\u01b0\u1ee3c t\u00e0i tr\u1ee3',
       'duoc tai tro',
       'noi dung duoc tai tro',
-      'nội dung được tài trợ'
+      'n\u1ed9i dung \u0111\u01b0\u1ee3c t\u00e0i tr\u1ee3'
     ];
 
     var normalize = function (text) {
@@ -1471,6 +1486,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
   }
 })();
 """
+
 
 @Composable
 fun NobookWebView(
