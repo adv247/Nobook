@@ -340,7 +340,7 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
                 return true
             }
             resetUploadState()
-            return false // Let multiplatform webview handle the actual file intent
+            return false 
         }
     }
 }
@@ -379,9 +379,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
-  // =========================================================================
   // 1. Anti-Clickjacking & Phishing
-  // =========================================================================
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
@@ -391,10 +389,8 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
      }
   }
 
-  // =========================================================================
-  // 2. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
-  // =========================================================================
-  const UI_SELECTORS_TO_REMOVE = [
+  // 2. J2TEAM Engine & DOM Sanitization
+  var UI_SELECTORS_TO_REMOVE = [
     '[aria-label="Sponsored"]',
     '[data-testid="story-sponsored-label"]',
     '[data-ad-comet-preview-id]',
@@ -403,7 +399,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     'div[id^="ad_"]'
   ];
 
-  const BLOCKED_NETWORK_PATTERNS = [
+  var BLOCKED_NETWORK_PATTERNS = [
     /an\.facebook\.com/,
     /pixel\.facebook\.com/,
     /graph\.facebook\.com\/v\d+\/\d+\/activities/,
@@ -428,24 +424,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     });
   }
 
-  // Helper cho Total Reactions (A Calmer Feed)
-  async function fetchRealReactions(feedbackId) {
-    try {
-        const dtsg = require("DTSGInitialData").token || document.querySelector('input[name="fb_dtsg"]').value;
-        const uid = document.cookie.match(/c_user=([0-9]+)/)[1];
-        if(!dtsg || !uid) return;
-        const body = new URLSearchParams();
-        body.append('fb_dtsg', dtsg);
-        body.append('variables', JSON.stringify({feedbackTargetID: feedbackId, scale: 1}));
-        body.append('doc_id', '5654316044686419'); // CometUFIReactionsDialogTabContentRefetchQuery doc_id (approximation)
-        // Lưu ý: Việc gọi GraphQL thuần bằng JS inject có thể bị CORS/CSRF block tùy cấu trúc trang.
-        // Đây là best-effort fallback.
-    } catch(e) {}
-  }
-
-  const origXhrOpen = XMLHttpRequest.prototype.open;
-  const origXhrSend = XMLHttpRequest.prototype.send;
-  const origXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+  var origXhrOpen = XMLHttpRequest.prototype.open;
+  var origXhrSend = XMLHttpRequest.prototype.send;
+  var origXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
 
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__nobookUrl = url;
@@ -461,17 +442,16 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
   XMLHttpRequest.prototype.send = function (body) {
     try {
-        this.setRequestHeader('sec-gpc', '1');
-        this.setRequestHeader('dnt', '1');
+        if (typeof this.setRequestHeader === 'function') {
+            this.setRequestHeader('sec-gpc', '1');
+            this.setRequestHeader('dnt', '1');
+        }
     } catch(e) {}
     
-    // Intercept Responses (Reactions)
     this.addEventListener('load', function() {
-        if (this.__nobookUrl && this.__nobookUrl.includes('graphql')) {
+        if (this.__nobookUrl && this.__nobookUrl.indexOf('graphql') !== -1) {
             try {
-                if (this.responseText && this.responseText.includes('HIDE_COUNTS')) {
-                    // Logic to fetch and display reactions goes here.
-                    // (Simplified logic to prevent DOM crashing).
+                if (this.responseText && this.responseText.indexOf('HIDE_COUNTS') !== -1) {
                     console.info('[Nobook] HIDE_COUNTS detected. Reacting to UI...');
                 }
             } catch(e) {}
@@ -480,7 +460,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     return origXhrSend.apply(this, arguments);
   };
 
-  const origFetch = window.fetch;
+  var origFetch = window.fetch;
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
@@ -490,54 +470,47 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
     }
     
-    // GPC & DNT Headers
     init = init || {};
     init.headers = init.headers || {};
     init.headers['sec-gpc'] = '1';
     init.headers['dnt'] = '1';
 
-    const response = await origFetch.call(this, input, init);
-    
-    // Intercept Reactions
-    if (url.includes('graphql')) {
-        const clone = response.clone();
-        clone.text().then(text => {
-            if(text.includes('CometUFIReactionsCountTooltipContentQuery') && text.includes('HIDE_COUNTS')) {
-                console.info('[Nobook] Facebook is hiding counts. Executing A Calmer Feed logic.');
-                // Gắn toast UI
-            }
-        }).catch(e => {});
+    try {
+        var response = await origFetch.call(this, input, init);
+        if (url.indexOf('graphql') !== -1) {
+            var clone = response.clone();
+            clone.text().then(function(text) {
+                if(text.indexOf('CometUFIReactionsCountTooltipContentQuery') !== -1 && text.indexOf('HIDE_COUNTS') !== -1) {
+                    console.info('[Nobook] Facebook is hiding counts. Executing A Calmer Feed logic.');
+                }
+            }).catch(function() {});
+        }
+        return response;
+    } catch(err) {
+        return Promise.reject(err);
     }
-
-    return response;
   };
 
   sanitizeDOM();
   var moSanitize = new MutationObserver(function () { sanitizeDOM(); });
   moSanitize.observe(document.body, { childList: true, subtree: true });
 
-  // =========================================================================
   // 3. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
-  // =========================================================================
   try {
       var origWS = window.WebSocket;
       window.WebSocket = new Proxy(origWS, {
         construct: function(target, args) {
-          var ws = new target(...args);
+          var ws = new target.apply(this, args);
           var origSend = ws.send;
           ws.send = function(data) {
             try {
-               // Messenger sử dụng MQTT over WebSocket
-               // Chặn ngầm mã byte hoặc JSON string chứa type 3 (Seen), 4 (Typing)
-               if (typeof data === 'string' && data.includes('/ls_req')) {
-                   if (data.includes('"type":4')) {
+               if (typeof data === 'string' && data.indexOf('/ls_req') !== -1) {
+                   if (data.indexOf('"type":4') !== -1) {
                        console.info('[Nobook] Chặn tín hiệu Đang Gõ (Typing)');
                        return;
                    }
-                   if (data.includes('"type":3') && data.includes('"label":"21"')) {
+                   if (data.indexOf('"type":3') !== -1 && data.indexOf('"label":"21"') !== -1) {
                        console.info('[Nobook] Chặn tín hiệu Đã Xem (Seen)');
-                       // *Lưu ý: M8/J2Team sửa đổi last_read_watermark_ts rồi encode lại. 
-                       // Ở mức inject JS đơn giản, ta drop packet để an toàn tuyệt đối.
                        return; 
                    }
                }
@@ -549,17 +522,15 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // =========================================================================
-  // 4. BẬT OVERLAY GIAO DIỆN CHAT MESSENGER WEB (KHÔNG APP NGOÀI)
-  // =========================================================================
-  var cssMsg = `
-    div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"],
-    div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"],
-    a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] {
-      display: none !important;
-    }
-    body { overflow: auto !important; }
-  `;
+  // 4. BẬT OVERLAY GIAO DIỆN CHAT MESSENGER WEB
+  var cssMsg = '' +
+    'div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"], ' +
+    'div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"], ' +
+    'a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] { ' +
+      'display: none !important; ' +
+    '} ' +
+    'body { overflow: auto !important; }';
+    
   var styleMsg = document.createElement('style');
   styleMsg.textContent = cssMsg;
   document.head.appendChild(styleMsg);
@@ -568,7 +539,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     var buttons = document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button');
     buttons.forEach(function(btn) {
       var text = (btn.innerText || btn.textContent || '').toLowerCase();
-      if (text.includes('lúc khác') || text.includes('not now') || text.includes('tiếp tục') || text.includes('continue')) {
+      if (text.indexOf('lúc khác') !== -1 || text.indexOf('not now') !== -1 || text.indexOf('tiếp tục') !== -1 || text.indexOf('continue') !== -1) {
         try { btn.click(); } catch(e) {}
       }
     });
@@ -576,23 +547,21 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   var moApp = new MutationObserver(dismissAppPrompts);
   moApp.observe(document.body, { childList: true, subtree: true });
 
-  // =========================================================================
-  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN KHI SẮP ĐẾN NGƯỠNG)
-  // =========================================================================
+  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ)
   (function initOptimizedTimer() {
-    const STORAGE_KEY = 'nobook_fb_usage_seconds';
-    const DATE_KEY = 'nobook_fb_usage_date';
-    const WARN_INTERVAL_SEC = 1800; // 30 phút
+    var STORAGE_KEY = 'nobook_fb_usage_seconds';
+    var DATE_KEY = 'nobook_fb_usage_date';
+    var WARN_INTERVAL_SEC = 1800; 
 
-    const todayStr = new Date().toDateString();
+    var todayStr = new Date().toDateString();
     if (localStorage.getItem(DATE_KEY) !== todayStr) {
       localStorage.setItem(DATE_KEY, todayStr);
       localStorage.setItem(STORAGE_KEY, '0');
     }
 
-    let spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
+    var spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
 
-    const badge = document.createElement('div');
+    var badge = document.createElement('div');
     badge.id = 'nobook-smart-timer-badge';
     badge.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.5);' +
       'color:#fff;font-size:10px;padding:2px 6px;border-radius:6px;z-index:999999;font-family:monospace;' +
@@ -600,21 +569,20 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     document.body.appendChild(badge);
 
     function showPopupWarning(minutes) {
-      const modal = document.createElement('div');
+      var modal = document.createElement('div');
       modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999999;' +
         'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
-      modal.innerHTML = `
-        <div style="background:#242526;color:#fff;padding:20px;border-radius:12px;max-width:280px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5);">
-          <div style="font-size:32px;margin-bottom:8px;">⏳</div>
-          <div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi chút nhé!</div>
-          <div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>\${minutes} phút</b>.</div>
-          <button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;">Đã hiểu</button>
-        </div>
-      `;
+      modal.innerHTML = 
+        '<div style="background:#242526;color:#fff;padding:20px;border-radius:12px;max-width:280px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5);">' +
+          '<div style="font-size:32px;margin-bottom:8px;">⏳</div>' +
+          '<div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi chút nhé!</div>' +
+          '<div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
+          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;">Đã hiểu</button>' +
+        '</div>';
       document.body.appendChild(modal);
       document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
           modal.remove(); 
-          badge.style.display = 'none'; // Ẩn badge sau khi đã popup
+          badge.style.display = 'none'; 
       };
     }
 
@@ -623,21 +591,20 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         spentSeconds += 1;
         if (spentSeconds % 5 === 0) localStorage.setItem(STORAGE_KEY, spentSeconds.toString());
         
-        let mins = Math.floor(spentSeconds / 60);
-        let secs = spentSeconds % 60;
+        var mins = Math.floor(spentSeconds / 60);
+        var secs = spentSeconds % 60;
         
-        let nextThreshold = Math.ceil(mins / 30) * 30; 
+        var nextThreshold = Math.ceil(mins / 30) * 30; 
         if (nextThreshold === 0) nextThreshold = 30;
 
-        // Chỉ hiện badge đếm ngược ở 1 phút trước mốc (vd: 29:00 -> 29:59)
         if (nextThreshold - mins === 1) {
             badge.style.display = 'block';
-            badge.textContent = mins + ':' + secs.toString().padStart(2, '0');
+            var formattedSecs = secs < 10 ? '0' + secs : secs;
+            badge.textContent = mins + ':' + formattedSecs;
         } else {
             badge.style.display = 'none';
         }
 
-        // Hiện Popup đúng mốc 30, 60, 90
         if (spentSeconds > 0 && spentSeconds % WARN_INTERVAL_SEC === 0) {
             showPopupWarning(Math.round(spentSeconds / 60));
         }
@@ -645,50 +612,43 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }, 1000);
   })();
 
-  // =========================================================================
   // 6. UPLOAD INTENT GATE
-  // =========================================================================
   document.addEventListener('click', function(e) {
-      var target = e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]');
+      var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
           window.UploadStateBridge.notifyUploadIntent();
       }
   }, true);
 
-  // =========================================================================
   // 7. DRAGGABLE AI ASSISTANT (BYOK)
-  // =========================================================================
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
           aiSidebar = document.createElement('div');
           aiSidebar.id = 'nobook-ai-sidebar';
-          // Style: Overlay có thể di chuyển, không dính cứng
           aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:450px;background:#fff;z-index:1000000;box-shadow:0 8px 24px rgba(0,0,0,0.3);border-radius:12px;display:flex;flex-direction:column;font-family:sans-serif;overflow:hidden;resize:both;';
           
-          aiSidebar.innerHTML = `
-            <div id="nobook-ai-header" style="background:#3578E5;color:#fff;padding:12px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
-                <span>🤖 Nobook AI</span>
-                <span id="nobook-ai-close" style="cursor:pointer;font-size:16px;">✖</span>
-            </div>
-            <div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">
-                <div style="display:flex;gap:5px;margin-bottom:5px;">
-                    <select id="nobook-ai-model" style="flex:1;padding:5px;border-radius:4px;border:1px solid #ccc;font-size:12px;">
-                        <option value="gpt">OpenAI GPT</option>
-                        <option value="gemini">Google Gemini</option>
-                    </select>
-                </div>
-                <input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;font-size:12px;">
-            </div>
-            <div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#fff;font-size:13px;display:flex;flex-direction:column;"></div>
-            <div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#f9f9f9;">
-                <input type="text" id="nobook-ai-input" placeholder="Hỏi AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:20px;outline:none;">
-                <button id="nobook-ai-send" style="background:none;border:none;color:#3578E5;font-weight:bold;cursor:pointer;padding:0 10px;">Gửi</button>
-            </div>
-          `;
+          aiSidebar.innerHTML = 
+            '<div id="nobook-ai-header" style="background:#3578E5;color:#fff;padding:12px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
+                '<span>🤖 Nobook AI</span>' +
+                '<span id="nobook-ai-close" style="cursor:pointer;font-size:16px;">✖</span>' +
+            '</div>' +
+            '<div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">' +
+                '<div style="display:flex;gap:5px;margin-bottom:5px;">' +
+                    '<select id="nobook-ai-model" style="flex:1;padding:5px;border-radius:4px;border:1px solid #ccc;font-size:12px;">' +
+                        '<option value="gpt">OpenAI GPT</option>' +
+                        '<option value="gemini">Google Gemini</option>' +
+                    '</select>' +
+                '</div>' +
+                '<input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;font-size:12px;">' +
+            '</div>' +
+            '<div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#fff;font-size:13px;display:flex;flex-direction:column;"></div>' +
+            '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#f9f9f9;">' +
+                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:20px;outline:none;">' +
+                '<button id="nobook-ai-send" style="background:none;border:none;color:#3578E5;font-weight:bold;cursor:pointer;padding:0 10px;">Gửi</button>' +
+            '</div>';
           document.body.appendChild(aiSidebar);
 
-          // Drag logic
           var header = document.getElementById('nobook-ai-header');
           var isDragging = false, startX, startY, startLeft, startTop;
           header.onmousedown = function(e) {
@@ -696,7 +656,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               startX = e.clientX; startY = e.clientY;
               var rect = aiSidebar.getBoundingClientRect();
               startLeft = rect.left; startTop = rect.top;
-              aiSidebar.style.right = 'auto'; // Disable right constraint
+              aiSidebar.style.right = 'auto';
               e.preventDefault();
           };
           window.addEventListener('mousemove', function(e) {
@@ -708,7 +668,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
           });
           window.addEventListener('mouseup', function() { isDragging = false; });
 
-          // Chat logic
           document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.display = 'none'; };
 
           document.getElementById('nobook-ai-send').onclick = async function() {
@@ -759,7 +718,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  // Add floating trigger button
   var trigger = document.createElement('div');
   trigger.innerHTML = '✨';
   trigger.style.cssText = 'position:fixed;top:60%;right:-10px;background:#fff;border-radius:50%;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,0.2);cursor:pointer;z-index:999998;font-size:20px;transition:right 0.2s;';
@@ -1253,33 +1211,32 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   };
 
   const createDownloadButton = () => {
-    const css = `
-      #${'$'}{DOWNLOAD_BTN_ID} {
-        position: fixed;
-        top: 70px;
-        right: 15px;
-        width: 40px;
-        height: 40px;
-        background-color: rgba(0, 0, 0, 0.7);
-        color: white;
-        border-radius: 50%;
-        z-index: ${'$'}{CONFIG.buttonZIndex};
-        border: none;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        font-size: 20px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
-        cursor: pointer;
-        background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 -960 960 960" fill="white"><path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></svg>');
-        background-repeat: no-repeat;
-        background-position: center;
-        background-size: 24px;
-      }
-      #${'$'}{DOWNLOAD_BTN_ID}.visible {
-        display: flex !important;
-      }
-    `;
+    const css = '' +
+      '#nobook-global-downloader {' +
+        'position: fixed;' +
+        'top: 70px;' +
+        'right: 15px;' +
+        'width: 40px;' +
+        'height: 40px;' +
+        'background-color: rgba(0, 0, 0, 0.7);' +
+        'color: white;' +
+        'border-radius: 50%;' +
+        'z-index: 999999;' +
+        'border: none;' +
+        'display: none;' +
+        'align-items: center;' +
+        'justify-content: center;' +
+        'font-size: 20px;' +
+        'box-shadow: 0 2px 5px rgba(0,0,0,0.3);' +
+        'cursor: pointer;' +
+        'background-image: url(\'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 -960 960 960" fill="white"><path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></svg>\');' +
+        'background-repeat: no-repeat;' +
+        'background-position: center;' +
+        'background-size: 24px;' +
+      '}' +
+      '#nobook-global-downloader.visible {' +
+        'display: flex !important;' +
+      '}';
 
     const style = document.createElement("style");
     style.textContent = css;
