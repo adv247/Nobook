@@ -308,7 +308,7 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
                 originUrl == trusted || originUrl.startsWith("$trusted/")
             }
             if (!isTrusted) {
-                request.deny()
+                request.deny() // Hard Block WebRTC requests from non-FB origins
                 return
             }
 
@@ -322,6 +322,7 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
                 return
             }
 
+            // Zero-Trust: Even on FB, only grant if user physically clicked Call/Answer
             if (!getCallState()) {
                 request.deny()
                 return
@@ -379,7 +380,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
+  // =========================================================================
   // 1. Anti-Clickjacking & Phishing
+  // =========================================================================
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
@@ -389,7 +392,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
      }
   }
 
+  // =========================================================================
   // 2. Apple SF Pro Font & DOM Blockers (CSS INJECTION - ZERO LAG)
+  // =========================================================================
   var cssCore = '' +
     '@import url("https://fonts.cdnfonts.com/css/sf-pro-display");' +
     '/* Áp dụng font cho Text, LOẠI TRỪ các thẻ Icon (i, svg) và class icon để không bị lỗi ô vuông ☒ */' +
@@ -420,7 +425,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   styleCore.textContent = cssCore;
   document.head.appendChild(styleCore);
 
+  // =========================================================================
   // 3. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
+  // =========================================================================
   var BLOCKED_NETWORK_PATTERNS = [
     /an\.facebook\.com/,
     /pixel\.facebook\.com/,
@@ -528,7 +535,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
+  // =========================================================================
   // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN TRƯỚC NGƯỠNG 1 PHÚT)
+  // =========================================================================
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
@@ -546,7 +555,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     badge.id = 'nobook-smart-timer-badge';
     badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.4);' +
       'color:#fff;font-size:10px;padding:2px 5px;border-radius:4px;z-index:999999;font-family:monospace;' +
-      'pointer-events:none;display:none;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);transition: opacity 0.3s;';
+      'pointer-events:none;display:none;backdrop-filter:blur(2px);transition: opacity 0.3s;';
     document.body.appendChild(badge);
 
     function showPopupWarning(minutes) {
@@ -587,7 +596,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
-        // Hiện Popup đúng mốc 30, 60, 90
         if (spentSeconds > 0 && spentSeconds % WARN_INTERVAL_SEC === 0) {
             showPopupWarning(Math.round(spentSeconds / 60));
         }
@@ -595,7 +603,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }, 1000);
   })();
 
+  // =========================================================================
   // 6. UPLOAD INTENT GATE
+  // =========================================================================
   document.addEventListener('click', function(e) {
       var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
@@ -603,13 +613,15 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
+  // =========================================================================
   // 7. DRAGGABLE AI ASSISTANT (APPLE ASSISTIVETOUCH STYLE & IMPORT COOKIE)
+  // =========================================================================
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
           aiSidebar = document.createElement('div');
           aiSidebar.id = 'nobook-ai-sidebar';
-          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:480px;background:#fff;z-index:1000000;box-shadow:0 8px 30px rgba(0,0,0,0.4);border-radius:16px;display:flex;flex-direction:column;font-family:"SF Pro Text", -apple-system, sans-serif;overflow:hidden;';
+          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:480px;background:#fff;z-index:1000000;box-shadow:0 8px 30px rgba(0,0,0,0.4);border-radius:16px;display:flex;flex-direction:column;font-family:"SF Pro Text", sans-serif;overflow:hidden;';
           
           aiSidebar.innerHTML = 
             '<div id="nobook-ai-header" style="background:#000;color:#fff;padding:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
@@ -750,7 +762,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (Mờ, Tròn, Draggable & Edge Snapping)
+  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (Mờ, Tròn, Draggable & Snap to Edge)
   var aiTrigger = document.createElement('div');
   aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
   aiTrigger.style.cssText = 'position:fixed;top:60%;right:10px;width:45px;height:45px;background:rgba(0,0,0,0.4);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.3;transition:opacity 0.3s, left 0.3s, right 0.3s; border:1px solid rgba(255,255,255,0.2);';
@@ -763,7 +775,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   
   aiTrigger.onmousedown = function(e) {
       isTriggerDragging = true;
-      aiTrigger.style.transition = 'none'; // Disable transition while dragging
+      aiTrigger.style.transition = 'none'; 
       trigStartY = e.clientY; trigStartX = e.clientX;
       tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
       e.preventDefault();
@@ -790,7 +802,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   function snapToEdge() {
       if (!isTriggerDragging) return;
       isTriggerDragging = false;
-      aiTrigger.style.transition = 'opacity 0.3s, left 0.3s, right 0.3s'; // Re-enable transition for snap
+      aiTrigger.style.transition = 'opacity 0.3s, left 0.3s, right 0.3s'; 
       var rect = aiTrigger.getBoundingClientRect();
       var centerX = rect.left + (rect.width / 2);
       if (centerX < window.innerWidth / 2) {
