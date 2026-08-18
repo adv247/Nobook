@@ -379,9 +379,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
-  // =========================================================================
   // 1. Anti-Clickjacking & Phishing
-  // =========================================================================
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
@@ -391,18 +389,27 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
      }
   }
 
-  // =========================================================================
-  // 2. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
-  // =========================================================================
-  var UI_SELECTORS_TO_REMOVE = [
-    '[aria-label="Sponsored"]',
-    '[data-testid="story-sponsored-label"]',
-    '[data-ad-comet-preview-id]',
-    '[data-adunit]',
-    '[data-sigil="m-feed-voice-subtitle"]',
-    'div[id^="ad_"]'
-  ];
+  // 2. Apple SF Pro Font & CSS Reset
+  var cssCore = '' +
+    '@import url("https://fonts.cdnfonts.com/css/sf-pro-display");' +
+    '* { font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }' +
+    'h1, h2, h3, h4, h5, h6, [role="heading"] { font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }' +
+    
+    // ẨN TRIỆT ĐỂ POPUP BẮT TẢI APP MESSENGER TRÊN WEB BẰNG CSS (KHÔNG DÙNG JS POLLING GÂY LAG)
+    'div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"], div[aria-label*="Tải ứng dụng Messenger"], div[aria-label*="Open in app"], a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] {' +
+    '  display: none !important; opacity: 0 !important; pointer-events: none !important;' +
+    '}' +
+    
+    // Ẩn rác UI Quảng cáo
+    '[aria-label="Sponsored"], [data-testid="story-sponsored-label"], [data-ad-comet-preview-id], [data-adunit], [data-sigil="m-feed-voice-subtitle"], div[id^="ad_"] {' +
+    '  display: none !important;' +
+    '}';
 
+  var styleCore = document.createElement('style');
+  styleCore.textContent = cssCore;
+  document.head.appendChild(styleCore);
+
+  // 3. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
   var BLOCKED_NETWORK_PATTERNS = [
     /an\.facebook\.com/,
     /pixel\.facebook\.com/,
@@ -416,17 +423,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     /coin-hive\.com/,
     /minergate\.com/
   ];
-
-  function sanitizeDOM() {
-    UI_SELECTORS_TO_REMOVE.forEach(function (sel) {
-      try {
-        document.querySelectorAll(sel).forEach(function (el) {
-          var root = el.closest('div[role="article"]') || el.closest('[data-pagelet]') || el;
-          root.style.display = 'none';
-        });
-      } catch (e) {}
-    });
-  }
 
   var origXhrOpen = XMLHttpRequest.prototype.open;
   var origXhrSend = XMLHttpRequest.prototype.send;
@@ -494,13 +490,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }
   };
 
-  sanitizeDOM();
-  var moSanitize = new MutationObserver(function () { sanitizeDOM(); });
-  moSanitize.observe(document.body, { childList: true, subtree: true });
-
-  // =========================================================================
-  // 3. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
-  // =========================================================================
+  // 4. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
   try {
       var origWS = window.WebSocket;
       window.WebSocket = new Proxy(origWS, {
@@ -527,9 +517,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // =========================================================================
-  // 4. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN 1 PHÚT TRƯỚC NGƯỠNG)
-  // =========================================================================
+  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, 10px, CHỈ HIỆN TRƯỚC NGƯỠNG 1 PHÚT)
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
@@ -545,8 +533,8 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
     var badge = document.createElement('div');
     badge.id = 'nobook-smart-timer-badge';
-    badge.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.5);' +
-      'color:#fff;font-size:10px;padding:2px 6px;border-radius:6px;z-index:999999;font-family:monospace;' +
+    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.4);' +
+      'color:#fff;font-size:10px;padding:2px 5px;border-radius:4px;z-index:999999;font-family:monospace;' +
       'pointer-events:none;display:none;backdrop-filter:blur(2px);transition: opacity 0.3s;';
     document.body.appendChild(badge);
 
@@ -588,6 +576,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
+        // Hiện Popup đúng mốc 30, 60, 90
         if (spentSeconds > 0 && spentSeconds % WARN_INTERVAL_SEC === 0) {
             showPopupWarning(Math.round(spentSeconds / 60));
         }
@@ -595,9 +584,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }, 1000);
   })();
 
-  // =========================================================================
-  // 5. UPLOAD INTENT GATE
-  // =========================================================================
+  // 6. UPLOAD INTENT GATE
   document.addEventListener('click', function(e) {
       var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
@@ -605,39 +592,40 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // =========================================================================
-  // 6. DRAGGABLE AI ASSISTANT (BYOK) & LAYER 12 COOKIE EXTRACTION
-  // =========================================================================
+  // 7. DRAGGABLE AI ASSISTANT (APPLE ASSISTIVETOUCH STYLE & IMPORT COOKIE)
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
           aiSidebar = document.createElement('div');
           aiSidebar.id = 'nobook-ai-sidebar';
-          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:480px;background:#fff;z-index:1000000;box-shadow:0 8px 24px rgba(0,0,0,0.3);border-radius:12px;display:flex;flex-direction:column;font-family:sans-serif;overflow:hidden;';
+          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:480px;background:#fff;z-index:1000000;box-shadow:0 8px 30px rgba(0,0,0,0.4);border-radius:16px;display:flex;flex-direction:column;font-family:"SF Pro Text", sans-serif;overflow:hidden;';
           
           aiSidebar.innerHTML = 
-            '<div id="nobook-ai-header" style="background:#3578E5;color:#fff;padding:12px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
-                '<span>🤖 Nobook Tools & AI</span>' +
-                '<span id="nobook-ai-close" style="cursor:pointer;font-size:16px;">✖</span>' +
+            '<div id="nobook-ai-header" style="background:#000;color:#fff;padding:15px;font-weight:600;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
+                '<span>✨ AI Assistant & Tools</span>' +
+                '<span id="nobook-ai-close" style="cursor:pointer;font-size:18px;">✖</span>' +
             '</div>' +
-            '<div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">' +
-                '<div style="display:flex;gap:5px;margin-bottom:5px;">' +
-                    '<select id="nobook-ai-model" style="flex:1;padding:5px;border-radius:4px;border:1px solid #ccc;font-size:12px;">' +
+            '<div style="padding:12px;border-bottom:1px solid #eaeaea;background:#f9f9f9;">' +
+                '<div style="display:flex;gap:8px;margin-bottom:8px;">' +
+                    '<select id="nobook-ai-model" style="flex:1;padding:8px;border-radius:8px;border:1px solid #ccc;font-size:13px;outline:none;">' +
                         '<option value="gpt">OpenAI GPT</option>' +
                         '<option value="gemini">Google Gemini</option>' +
                     '</select>' +
                 '</div>' +
-                '<input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;font-size:12px;">' +
-                '<button id="nobook-extract-cookie" style="width:100%;padding:8px;margin-top:8px;background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;">🍪 Trích xuất FB Cookies (Layer 12)</button>' +
+                '<input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:8px;box-sizing:border-box;border-radius:8px;border:1px solid #ccc;font-size:13px;margin-bottom:8px;outline:none;">' +
+                '<div style="display:flex; gap:8px;">' +
+                  '<button id="nobook-extract-cookie" style="flex:1;padding:8px;background:#34C759;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;">Xuất Cookie</button>' +
+                  '<button id="nobook-import-cookie" style="flex:1;padding:8px;background:#FF9500;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;">Nhập Cookie</button>' +
+                '</div>' +
             '</div>' +
-            '<div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#fff;font-size:13px;display:flex;flex-direction:column;"></div>' +
-            '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#f9f9f9;">' +
-                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:20px;outline:none;">' +
-                '<button id="nobook-ai-send" style="background:none;border:none;color:#3578E5;font-weight:bold;cursor:pointer;padding:0 10px;">Gửi</button>' +
+            '<div id="nobook-ai-chat" style="flex:1;padding:12px;overflow-y:auto;background:#fff;font-size:14px;display:flex;flex-direction:column;line-height:1.4;"></div>' +
+            '<div style="padding:12px;border-top:1px solid #eaeaea;display:flex;background:#f9f9f9;align-items:center;">' +
+                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI..." style="flex:1;padding:10px 12px;border:1px solid #ccc;border-radius:20px;outline:none;font-size:14px;">' +
+                '<button id="nobook-ai-send" style="background:none;border:none;color:#007AFF;font-weight:600;font-size:15px;cursor:pointer;padding:0 0 0 12px;">Gửi</button>' +
             '</div>';
           document.body.appendChild(aiSidebar);
 
-          // Drag logic
+          // Drag logic for Panel
           var header = document.getElementById('nobook-ai-header');
           var isDragging = false, startY = 0, startX = 0, startTop = 0, startLeft = 0;
           header.onmousedown = function(e) {
@@ -645,7 +633,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               startX = e.clientX; startY = e.clientY;
               var rect = aiSidebar.getBoundingClientRect();
               startLeft = rect.left; startTop = rect.top;
-              aiSidebar.style.right = 'auto'; // Remove right constraint to allow free drag
+              aiSidebar.style.right = 'auto'; 
               e.preventDefault();
           };
           header.ontouchstart = function(e) {
@@ -672,18 +660,31 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
           document.getElementById('nobook-extract-cookie').onclick = function() {
               var cookies = document.cookie;
               var formatted = "FB Cookies:\n" + cookies.split(';').map(c => c.trim()).join('\n');
-              
               if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
                   window.ClipboardBridge.copyText(formatted);
-                  alert("Đã sao chép Cookie FB vào bộ nhớ đệm (ClipboardBridge)!");
+                  alert("Đã sao chép Cookie FB vào bộ nhớ đệm!");
               } else if (navigator.clipboard) {
                   navigator.clipboard.writeText(formatted).then(function() {
                       alert("Đã sao chép Cookie FB vào Clipboard hệ thống!");
                   }).catch(function(err) {
-                      alert("Lỗi khi sao chép Cookie: " + err);
+                      prompt("Copy thủ công:", formatted);
                   });
-              } else {
-                  prompt("Vui lòng copy thủ công Cookie dưới đây:", formatted);
+              }
+          };
+
+          // Cookie Import Logic
+          document.getElementById('nobook-import-cookie').onclick = function() {
+              var input = prompt("Dán FB Cookies vào đây (định dạng key=value;):");
+              if (input) {
+                  var cookiesArray = input.replace('FB Cookies:\n', '').split(';');
+                  cookiesArray.forEach(function(c) {
+                      var trimmed = c.trim();
+                      if (trimmed) {
+                          document.cookie = trimmed + "; path=/; domain=.facebook.com";
+                      }
+                  });
+                  alert("Import Cookie thành công! Đang tải lại trang...");
+                  window.location.reload();
               }
           };
 
@@ -698,13 +699,13 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               var text = input.value.trim();
               if (!text || !key) { alert('Vui lòng nhập API Key và nội dung.'); return; }
 
-              chat.innerHTML += '<div style="margin-bottom:8px;text-align:right;"><span style="background:#3578E5;color:#fff;padding:8px 12px;border-radius:18px 18px 0 18px;display:inline-block;max-width:85%;text-align:left;">' + text + '</span></div>';
+              chat.innerHTML += '<div style="margin-bottom:12px;text-align:right;"><span style="background:#007AFF;color:#fff;padding:10px 14px;border-radius:18px 18px 4px 18px;display:inline-block;max-width:85%;text-align:left;">' + text + '</span></div>';
               input.value = '';
               chat.scrollTop = chat.scrollHeight;
 
               var resDiv = document.createElement('div');
-              resDiv.style.cssText = 'margin-bottom:8px;text-align:left;';
-              resDiv.innerHTML = '<span style="background:#f0f2f5;color:#000;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;max-width:85%;">Đang tải...</span>';
+              resDiv.style.cssText = 'margin-bottom:12px;text-align:left;';
+              resDiv.innerHTML = '<span style="background:#F2F2F7;color:#000;padding:10px 14px;border-radius:18px 18px 18px 4px;display:inline-block;max-width:85%;">Đang tải...</span>';
               chat.appendChild(resDiv);
               chat.scrollTop = chat.scrollHeight;
 
@@ -727,9 +728,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
                       if (json.error) throw new Error(json.error.message);
                       responseText = json.choices[0].message.content;
                   }
-                  resDiv.innerHTML = '<span style="background:#f0f2f5;color:#000;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;word-break:break-word;max-width:85%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
+                  resDiv.innerHTML = '<span style="background:#F2F2F7;color:#000;padding:10px 14px;border-radius:18px 18px 18px 4px;display:inline-block;word-break:break-word;max-width:85%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
               } catch(e) {
-                  resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;">Lỗi: ' + e.message + '</span>';
+                  resDiv.innerHTML = '<span style="background:#FF3B30;color:#fff;padding:10px 14px;border-radius:18px 18px 18px 4px;display:inline-block;">Lỗi: ' + e.message + '</span>';
               }
               chat.scrollTop = chat.scrollHeight;
           };
@@ -738,119 +739,51 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  // Add floating trigger button (Draggable on right side)
+  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (Mờ, Tròn, Draggable)
   var aiTrigger = document.createElement('div');
-  aiTrigger.innerHTML = '✨';
-  aiTrigger.style.cssText = 'position:fixed;top:60%;right:0px;background:#fff;border-radius:50% 0 0 50%;padding:10px 10px 10px 15px;box-shadow:-2px 2px 10px rgba(0,0,0,0.2);cursor:move;z-index:999998;font-size:20px;opacity:0.3;transition:opacity 0.3s;';
+  aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
+  aiTrigger.style.cssText = 'position:fixed;top:60%;right:10px;width:45px;height:45px;background:rgba(0,0,0,0.4);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.3;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.2);';
   
   aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
   aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.3'; };
   
   var isTriggerDragging = false;
-  var tStartY, tStartTop;
+  var trigStartY, tStartTop, trigStartX, tStartLeft;
   
   aiTrigger.onmousedown = function(e) {
       isTriggerDragging = true;
-      tStartY = e.clientY;
-      tStartTop = aiTrigger.offsetTop;
+      trigStartY = e.clientY; trigStartX = e.clientX;
+      tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
       e.preventDefault();
   };
   aiTrigger.ontouchstart = function(e) {
       isTriggerDragging = true;
-      tStartY = e.touches[0].clientY;
-      tStartTop = aiTrigger.offsetTop;
+      trigStartY = e.touches[0].clientY; trigStartX = e.touches[0].clientX;
+      tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
   };
   window.addEventListener('mousemove', function(e) {
       if (!isTriggerDragging) return;
-      aiTrigger.style.top = (tStartTop + (e.clientY - tStartY)) + 'px';
+      aiTrigger.style.top = (tStartTop + (e.clientY - trigStartY)) + 'px';
+      aiTrigger.style.left = (tStartLeft + (e.clientX - trigStartX)) + 'px';
+      aiTrigger.style.right = 'auto';
   }, {passive: true});
   window.addEventListener('touchmove', function(e) {
       if (!isTriggerDragging) return;
-      aiTrigger.style.top = (tStartTop + (e.touches[0].clientY - tStartY)) + 'px';
+      aiTrigger.style.top = (tStartTop + (e.touches[0].clientY - trigStartY)) + 'px';
+      aiTrigger.style.left = (tStartLeft + (e.touches[0].clientX - trigStartX)) + 'px';
+      aiTrigger.style.right = 'auto';
   }, {passive: true});
   window.addEventListener('mouseup', function() { isTriggerDragging = false; });
   window.addEventListener('touchend', function() { isTriggerDragging = false; });
 
   aiTrigger.onclick = function(e) {
-      if (Math.abs(e.clientY - tStartY) < 5) {
+      if (Math.abs(e.clientY - trigStartY) < 5) {
           window.toggleNobookAI(); 
       }
   };
   document.body.appendChild(aiTrigger);
 
   console.info('[Nobook] Security, Privacy Engine & AI Assistant Active.');
-})();
-"""
-
-private const val MESSENGER_GUARD_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookMessengerGuardActive) return;
-    window.__nobookMessengerGuardActive = true;
-
-    function isMessengerDeepLink(url) {
-      if (!url) return false;
-      var l = String(url).toLowerCase();
-      return l.indexOf("fb-messenger://") === 0 ||
-        (l.indexOf("intent://") === 0 && l.indexOf("messenger") !== -1) ||
-        l.indexOf("com.facebook.orca") !== -1 ||
-        (l.indexOf("market://details") === 0 && l.indexOf("orca") !== -1) ||
-        (l.indexOf("play.google.com/store/apps/details") !== -1 && l.indexOf("com.facebook.orca") !== -1);
-    }
-
-    document.addEventListener("click", function (e) {
-      var el = e.target;
-      var link = el && el.closest ? el.closest("a[href]") : null;
-      
-      // BẮT SỰ KIỆN CLICK VÀO ICON MESSENGER ĐỂ BYPASS TẢI APP TRÊN WEB MOBILE
-      var isMsgIcon = el && el.closest ? el.closest('a[href*="/messages/"], a[aria-label="Messenger"], div[aria-label="Messenger"]') : null;
-      if (isMsgIcon) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-        console.info("[Nobook] Chuyển hướng Messenger Web (Bypass ép tải App)");
-        window.location.href = "https://www.facebook.com/messages/";
-        return;
-      }
-
-      if (link && isMessengerDeepLink(link.href)) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-      }
-    }, true);
-
-    var origOpen = window.open;
-    window.open = function (url) {
-      if (isMessengerDeepLink(url)) {
-        console.info("[Nobook] Blocked window.open to Messenger deep link:", url);
-        return null;
-      }
-      return origOpen.apply(window, arguments);
-    };
-
-    // ẨN TRIỆT ĐỂ POPUP BẮT TẢI APP MESSENGER TRÊN GIAO DIỆN CHAT (DỰA THEO ẢNH CUNG CẤP)
-    var css = 'div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"], div[aria-label*="Tải ứng dụng Messenger"], a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] { display: none !important; } body { overflow: auto !important; }';
-    var style = document.createElement('style');
-    style.textContent = css;
-    document.head.appendChild(style);
-
-    function dismissAppPrompts() {
-      var buttons = document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button');
-      buttons.forEach(function(btn) {
-        var text = (btn.innerText || btn.textContent || '').toLowerCase();
-        if (text.indexOf('lúc khác') !== -1 || text.indexOf('not now') !== -1 || text.indexOf('tiếp tục') !== -1 || text.indexOf('continue') !== -1 || text.indexOf('đóng') !== -1 || text.indexOf('close') !== -1) {
-          try { btn.click(); } catch(e) {}
-        }
-      });
-    }
-    var moApp = new MutationObserver(dismissAppPrompts);
-    moApp.observe(document.body, { childList: true, subtree: true });
-
-    console.info("[Nobook] Messenger deep-link guard & Web Bypass active");
-  } catch (err) {
-    console.error("[Nobook] Messenger guard injection failed:", err);
-  }
 })();
 """
 
@@ -1480,6 +1413,60 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 })();
 """
 
+private const val MESSENGER_GUARD_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookMessengerGuardActive) return;
+    window.__nobookMessengerGuardActive = true;
+
+    function isMessengerDeepLink(url) {
+      if (!url) return false;
+      var l = String(url).toLowerCase();
+      return l.indexOf("fb-messenger://") === 0 ||
+        (l.indexOf("intent://") === 0 && l.indexOf("messenger") !== -1) ||
+        l.indexOf("com.facebook.orca") !== -1 ||
+        (l.indexOf("market://details") === 0 && l.indexOf("orca") !== -1) ||
+        (l.indexOf("play.google.com/store/apps/details") !== -1 && l.indexOf("com.facebook.orca") !== -1);
+    }
+
+    document.addEventListener("click", function (e) {
+      var el = e.target;
+      var link = el && el.closest ? el.closest("a[href]") : null;
+      
+      // BẮT SỰ KIỆN CLICK VÀO ICON MESSENGER ĐỂ BYPASS TẢI APP TRÊN WEB MOBILE
+      var isMsgIcon = el && el.closest ? el.closest('a[href*="/messages/"], a[aria-label="Messenger"], div[aria-label="Messenger"], svg[aria-label="Messenger"]') : null;
+      if (isMsgIcon) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        console.info("[Nobook] Chuyển hướng Messenger Web (Bypass ép tải App)");
+        window.location.href = "https://www.facebook.com/messages/";
+        return;
+      }
+
+      if (link && isMessengerDeepLink(link.href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+      }
+    }, true);
+
+    var origOpen = window.open;
+    window.open = function (url) {
+      if (isMessengerDeepLink(url)) {
+        console.info("[Nobook] Blocked window.open to Messenger deep link:", url);
+        return null;
+      }
+      return origOpen.apply(window, arguments);
+    };
+
+    console.info("[Nobook] Messenger deep-link guard & Web Bypass active");
+  } catch (err) {
+    console.error("[Nobook] Messenger guard injection failed:", err);
+  }
+})();
+"""
+
 private const val LINK_CLEANER_SCRIPT = """
 (function () {
   try {
@@ -1797,26 +1784,11 @@ private const val UX_EXTRAS_SCRIPT = """
     if (window.__nobookUxExtrasActive) return;
     window.__nobookUxExtrasActive = true;
 
-    var hideAppBanners = function () {
-      document.querySelectorAll('div[role="button"]').forEach(function (btn) {
-        var label = (btn.getAttribute('aria-label') || btn.textContent || '').toLowerCase();
-        if (label.indexOf('use app') !== -1 || label.indexOf('get app') !== -1 ||
-            label.indexOf('open in app') !== -1 || label.indexOf('mo trong app') !== -1 ||
-            label.indexOf('tai app') !== -1) {
-          var container = btn.closest('div[role="dialog"]') || btn.parentElement;
-          if (container) container.style.display = 'none';
-        }
-      });
-      document.querySelectorAll('a[href*="itunes.apple.com"], a[href*="play.google.com/store"]').forEach(function (a) {
-        var wrap = a.closest('div[role="dialog"]') || a.parentElement;
-        if (wrap) wrap.style.display = 'none';
-      });
-    };
-
     var addVideoControls = function () {
       document.querySelectorAll('video').forEach(function (v) {
         if (!v.hasAttribute('controls')) {
           v.setAttribute('controls', 'controls');
+          v.setAttribute('playsinline', '');
           v.controls = true;
         }
       });
@@ -1853,7 +1825,6 @@ private const val UX_EXTRAS_SCRIPT = """
     };
 
     var runAll = function () {
-      hideAppBanners();
       addVideoControls();
       bindImageMagnifier();
     };
@@ -2099,7 +2070,7 @@ fun NobookWebView(
                 .edit()
                 .putString("download_folder_uri", uri.toString())
                 .apply()
-            Toast.makeText(context, "Da chon thu muc luu tai xuong moi", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Đã chọn thư mục lưu tải xuống mới", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -2116,7 +2087,7 @@ fun NobookWebView(
             } else if (isBlockedSite(externalUrl)) {
                 Toast.makeText(
                     context,
-                    "Nobook: da chan link nay theo danh sach blocklist",
+                    "Nobook: Đã chặn link này theo danh sách blocklist",
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
