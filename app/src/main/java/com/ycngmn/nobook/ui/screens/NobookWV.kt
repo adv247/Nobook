@@ -2,6 +2,8 @@ package com.ycngmn.nobook.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebSettings
@@ -65,6 +67,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 
 private const val ANTI_RELOAD_SCRIPT = """
 (function () {
@@ -110,11 +113,44 @@ console.error("[Nobook] Anti-Reload injection failed:", err);
 })();
 """
 
-private val AFFILIATE_PARAM_PREFIXES = listOf("aff_", "utm_", "af_", "deep_link_")
+/**
+ * Universal URL Sanitizer & Anti-Affiliate Engine (ClearURLs-inspired).
+ *
+ * [AFFILIATE_PARAM_PREFIXES] matches any query parameter whose name *starts*
+ * with one of these prefixes (covers utm_source, aff_id, spm_url, etc. in a
+ * single rule instead of enumerating every vendor's exact variant).
+ */
+private val AFFILIATE_PARAM_PREFIXES = listOf(
+    "aff_", "utm_", "af_", "deep_link_", "track_", "spm_", "scm_", "ad_", "algo_"
+)
+
+/**
+ * [AFFILIATE_PARAM_EXACT] matches full query-parameter names for tracking /
+ * affiliate identifiers that do not follow a common prefix convention,
+ * grouped by the platform that introduces them (Global analytics, Taobao/
+ * Tmall/1688/AliExpress/Xianyu, Amazon, Google Search/Maps, Reddit/X, and
+ * Shopee/Lazada). Kept as exact matches (not prefixes) to avoid stripping
+ * unrelated short parameter names like a legitimate "t" used by other sites.
+ */
 private val AFFILIATE_PARAM_EXACT = setOf(
+    // Global & analytics
     "sub_id", "smtt", "is_from_signup", "fbclid", "ttclid", "gclid", "msclkid",
+    "yclid", "igshid", "_hsenc", "_openstat", "mc_cid", "mc_eid",
     "pid", "c", "businessId", "is_copy_url", "is_from_webapp", "sender_device",
-    "sender_web_id", "enter_method", "share_app_id", "share_link_id", "checksum"
+    "sender_web_id", "enter_method", "share_app_id", "share_link_id", "checksum",
+    // Taobao / Tmall / 1688 / AliExpress / Xianyu
+    "tk", "spm", "scm", "pvid", "bxsign", "algo_pvid", "algo_expid", "btsid",
+    "ws_ab_test", "sk", "sourceType", "suid", "share_crt_v", "un", "shareurl",
+    // Amazon
+    "tag", "linkCode", "ascsubtag", "creative", "camp", "creativeASIN", "ref_",
+    "pf_rd_r", "pf_rd_p", "pf_rd_m", "pf_rd_s", "pf_rd_t", "pf_rd_i",
+    "pd_rd_r", "pd_rd_w", "pd_rd_wg", "qid", "sr",
+    // Google Search & Google Maps
+    "ved", "usg", "sa", "ei", "g_ep", "g_st", "source", "source_id", "entry", "coh",
+    // Reddit & X/Twitter
+    "context", "rdt", "s", "t", "ref_src", "ref_url",
+    // Shopee & Lazada
+    "extra_params", "traffic_source", "share_relation_params", "aff_trace_key", "exparams"
 )
 
 private fun sanitizeTrackingParams(url: String): String {
@@ -129,14 +165,38 @@ private fun sanitizeTrackingParams(url: String): String {
                 builder.appendQueryParameter(paramName, uri.getQueryParameter(paramName))
             }
         }
-        builder.build().toString()
+        val cleaned = builder.build().toString()
+        cleaned.trimEnd('?', '&')
     }.getOrDefault(url)
+}
+
+private val REDIRECT_WRAPPER_PARAM_KEYS = listOf(
+    "u", "url", "q", "target", "dest", "destination", "redirect", "redirect_url"
+)
+
+private fun unwrapRedirectWrapper(urlStr: String): String {
+    return runCatching {
+        val uri = Uri.parse(urlStr)
+        for (key in REDIRECT_WRAPPER_PARAM_KEYS) {
+            val raw = uri.getQueryParameter(key) ?: continue
+            if (raw.isBlank()) continue
+            val decoded = runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+            if (decoded.startsWith("http", ignoreCase = true)) return decoded
+        }
+        urlStr
+    }.getOrDefault(urlStr)
 }
 
 private val MONETIZED_SHORTLINK_HOSTS = setOf(
     "s.shopee.vn", "shope.ee", "vn.shp.ee", "shp.ee",
     "s.lazada.vn", "s.lazada.com", "lzd.co",
-    "vt.tiktok.com", "vm.tiktok.com"
+    "vt.tiktok.com", "vm.tiktok.com",
+    "m.tb.cn", "tb.cn", "s.click.taobao.com", "detail.m.tmall.com", "e.tb.cn",
+    "1688.com", "aliexpress.com", "s.click.aliexpress.com", "m.aliexpress.com",
+    "2.taobao.com",
+    "amzn.to", "amzn.eu", "amzn.asia", "a.co",
+    "t.co", "x.com", "redd.it", "bit.ly", "tinyurl.com", "goo.gl",
+    "maps.app.goo.gl", "zalo.me", "chat.zalo.me", "fb.me", "fb.watch"
 )
 
 private fun isMonetizedShortLink(url: String): Boolean {
@@ -149,22 +209,37 @@ private fun isMonetizedShortLink(url: String): Boolean {
 private fun resolveFinalUrl(startUrl: String, maxHops: Int = 5): String {
     var current = startUrl
     repeat(maxHops) {
+        val unwrapped = unwrapRedirectWrapper(current)
+        if (unwrapped != current) {
+            current = unwrapped
+            return@repeat
+        }
         val resolved = runCatching {
             val conn = (URL(current).openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 requestMethod = "HEAD"
                 connectTimeout = 4000
                 readTimeout = 4000
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10)")
+                setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+                )
+                setRequestProperty(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
             }
-            val code = conn.responseCode
-            val location = conn.getHeaderField("Location")
-            conn.disconnect()
-            if (code in 300..399 && !location.isNullOrBlank()) {
-                if (location.startsWith("http", ignoreCase = true)) location
-                else Uri.parse(current).buildUpon().encodedPath(location).build().toString()
-            } else {
-                null
+            try {
+                val code = conn.responseCode
+                val location = conn.getHeaderField("Location")
+                if (code in intArrayOf(301, 302, 303, 307, 308) && !location.isNullOrBlank()) {
+                    if (location.startsWith("http", ignoreCase = true)) location
+                    else Uri.parse(current).buildUpon().encodedPath(location).build().toString()
+                } else {
+                    null
+                }
+            } finally {
+                conn.disconnect()
             }
         }.getOrNull()
         if (resolved == null) return current
@@ -200,14 +275,16 @@ private object VideoPlaybackBridge {
     @Volatile
     var onPlaybackChanged: ((Boolean) -> Unit)? = null
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     @android.webkit.JavascriptInterface
     fun onVideoPlaying() {
-        onPlaybackChanged?.invoke(true)
+        mainHandler.post { onPlaybackChanged?.invoke(true) }
     }
 
     @android.webkit.JavascriptInterface
     fun onVideoPaused() {
-        onPlaybackChanged?.invoke(false)
+        mainHandler.post { onPlaybackChanged?.invoke(false) }
     }
 }
 
@@ -874,6 +951,17 @@ console.error("[Nobook] Messenger guard injection failed:", err);
 """
 
 private const val LINK_CLEANER_SCRIPT = """
+/*
+ * Universal URL Sanitizer - Tier 1 (client-side DOM cleaner).
+ * Unwraps one level of redirector wrapping (Facebook l.php?u=, Google
+ * /url?q=, Zalo /redirect?target=, and generic redirect/dest/destination
+ * params) then strips the ClearURLs-style tracking/affiliate parameter set
+ * directly on <a> tags before a click is dispatched, so the browser never
+ * even sees the tagged URL. A MutationObserver re-scans dynamically loaded
+ * links (infinite feed scroll, lazy-rendered e-commerce cards) so freshly
+ * inserted anchors get sanitized too. Mirrors the native Tier 2 pipeline
+ * (sanitizeTrackingParams / resolveFinalUrl) in Kotlin.
+ */
 (function () {
 try {
 if (window.__nobookLinkCleanerActive) return;
@@ -881,16 +969,28 @@ window.__nobookLinkCleanerActive = true;
 
 var FB_TRACKING_PARAMS = [
 'fbclid', '__tn__', '__cft__', '__xts__', 'refid', 'ref', 'notif_t',
-'notif_id', 'tn', 'hc_ref', 'eid', 'fref', 'source', 'source_id'
+'notif_id', 'tn', 'hc_ref', 'eid', 'fref', 'source', 'source_id',
+'gclid', 'ttclid', 'msclkid', 'yclid', 'igshid', '_hsenc', '_openstat',
+'mc_cid', 'mc_eid', 'ved', 'usg', 'sa', 'ei', 'g_ep', 'g_st', 'entry', 'coh',
+'context', 'rdt', 's', 't', 'ref_src', 'ref_url',
+'tk', 'spm', 'scm', 'pvid', 'bxsign', 'algo_pvid', 'algo_expid', 'btsid',
+'ws_ab_test', 'sk', 'sourceType', 'suid', 'share_crt_v', 'un', 'shareurl',
+'tag', 'linkCode', 'ascsubtag', 'creative', 'camp', 'creativeASIN', 'ref_',
+'pf_rd_r', 'pf_rd_p', 'pf_rd_m', 'pf_rd_s', 'pf_rd_t', 'pf_rd_i',
+'pd_rd_r', 'pd_rd_w', 'pd_rd_wg', 'qid', 'sr',
+'extra_params', 'traffic_source', 'share_relation_params', 'aff_trace_key', 'exparams'
 ];
-var AFF_PREFIXES = ['utm_', 'aff_', 'af_'];
+var AFF_PREFIXES = ['utm_', 'aff_', 'af_', 'deep_link_', 'track_', 'spm_', 'scm_', 'ad_', 'algo_'];
+var WRAPPER_PARAM_KEYS = ['u', 'url', 'q', 'target', 'dest', 'destination', 'redirect', 'redirect_url'];
 
-function unwrapFacebookRedirect(urlStr) {
+function unwrapRedirect(urlStr) {
 try {
 var u = new URL(urlStr, window.location.href);
-if (/(^|\.)facebook\.com$/.test(u.hostname) && u.pathname === '/l.php') {
-var target = u.searchParams.get('u');
-if (target) return decodeURIComponent(target);
+for (var i = 0; i < WRAPPER_PARAM_KEYS.length; i++) {
+var raw = u.searchParams.get(WRAPPER_PARAM_KEYS[i]);
+if (!raw) continue;
+var decoded = decodeURIComponent(raw);
+if (/^https?:\/\//i.test(decoded)) return decoded;
 }
 } catch (e) { /* ignore */ }
 return urlStr;
@@ -906,7 +1006,8 @@ if (AFF_PREFIXES.some(function (pref) { return lower.indexOf(pref) === 0; })) {
 u.searchParams.delete(k);
 }
 });
-return u.toString();
+var result = u.toString();
+return result.replace(/[?&]$/, '');
 } catch (e) {
 return urlStr;
 }
@@ -914,7 +1015,7 @@ return urlStr;
 
 function cleanLink(a) {
 if (!a.href) return;
-var cleaned = unwrapFacebookRedirect(a.href);
+var cleaned = unwrapRedirect(a.href);
 cleaned = stripParams(cleaned);
 if (cleaned !== a.href) {
 try { a.href = cleaned; } catch (e) { /* ignore */ }
@@ -933,7 +1034,7 @@ scan();
 var observer = new MutationObserver(function () { scan(); });
 observer.observe(document.body, { childList: true, subtree: true });
 
-console.info('[Nobook] Link cleaner active (FB tracking + affiliate params stripped from all links)');
+console.info('[Nobook] Link cleaner active (ClearURLs-style tracking + affiliate + redirect-wrapper stripping)');
 } catch (err) {
 console.error('[Nobook] Link cleaner injection failed:', err);
 }
@@ -1848,10 +1949,15 @@ fun NobookWebView(
     // battery and network while Nobook is not visible to the user.
     // RenderPriority is also lowered while backgrounded (HIGH only while
     // visible/foreground) so Chromium deprioritizes a WebView the user
-    // cannot currently see. On ON_DESTROY (activity truly finishing, not
-    // just backgrounded), the native WebView is explicitly destroyed to
-    // release its internal renderer/GPU resources and avoid cross-session
-    // memory leaks.
+    // cannot currently see.
+    //
+    // FIX (crash on rotate/theme change): destroy() must only run when the
+    // hosting Activity is truly finishing (activity?.isFinishing == true),
+    // not merely backgrounded. ON_DESTROY also fires on configuration
+    // changes (screen rotation, theme switch) while the Activity itself
+    // survives via retained state; destroying the native WebView there
+    // left `state` pointing at a dead WebView that Compose then tried to
+    // recompose into, crashing on the next frame.
     DisposableEffect(lifecycleOwner, state) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -1872,10 +1978,12 @@ fun NobookWebView(
                     }
                 }
                 Lifecycle.Event.ON_DESTROY -> {
-                    runCatching {
-                        state.nativeWebView.stopLoading()
-                        state.nativeWebView.clearHistory()
-                        state.nativeWebView.destroy()
+                    if (activity?.isFinishing == true) {
+                        runCatching {
+                            state.nativeWebView.stopLoading()
+                            state.nativeWebView.clearHistory()
+                            state.nativeWebView.destroy()
+                        }
                     }
                 }
                 else -> Unit
@@ -1892,7 +2000,9 @@ fun NobookWebView(
     // PERFORMANCE_OPTIMIZATION_SCRIPT notifies this bridge on play/pause of
     // any video element so the layer type can drop back to NONE for
     // plain feed scrolling and only pay the hardware-layer cost while
-    // video playback is active.
+    // video playback is active. VideoPlaybackBridge already hops back to
+    // the main thread internally (see its KDoc), so it is safe to call
+    // setLayerType directly from this callback.
     DisposableEffect(state) {
         VideoPlaybackBridge.onPlaybackChanged = { isPlaying ->
             runCatching {
@@ -2002,14 +2112,24 @@ fun NobookWebView(
                 // scrolls to them, to cut initial data usage and memory
                 // pressure from decoded bitmaps. On Wi-Fi/validated
                 // broadband, load normally.
-                val connectivityManager = context.getSystemService(
-                    android.content.Context.CONNECTIVITY_SERVICE
-                ) as? android.net.ConnectivityManager
-                val activeNetwork = connectivityManager?.activeNetwork
-                val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
-                val isWeakOrMetered = capabilities == null ||
-                    (!capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
-                        !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                //
+                // FIX (crash on missing/denied ACCESS_NETWORK_STATE):
+                // getNetworkCapabilities() can throw SecurityException on
+                // some OEM builds or restricted profiles even when the
+                // permission is declared in the manifest but revoked by
+                // the user/OS. The whole probe is now wrapped in
+                // runCatching so a failed check degrades to "assume
+                // metered" (safer default) instead of crashing the app.
+                val isWeakOrMetered = runCatching {
+                    val connectivityManager = context.getSystemService(
+                        android.content.Context.CONNECTIVITY_SERVICE
+                    ) as? android.net.ConnectivityManager
+                    val activeNetwork = connectivityManager?.activeNetwork
+                    val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+                    capabilities == null ||
+                        (!capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+                            !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                }.getOrDefault(true)
                 settings.loadsImagesAutomatically = !isWeakOrMetered
             }
         }
