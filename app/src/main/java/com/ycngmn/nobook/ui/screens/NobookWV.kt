@@ -1,11 +1,15 @@
 package com.ycngmn.nobook.ui.screens
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -266,6 +270,81 @@ private object VideoPlaybackBridge {
         mainHandler.post { onPlaybackChanged?.invoke(false) }
     }
 }
+
+private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit) {
+    @JavascriptInterface
+    fun notifyCallIntent(isCalling: Boolean) {
+        Handler(Looper.getMainLooper()).post { onCallStateChanged(isCalling) }
+    }
+}
+
+private val TRUSTED_WEBRTC_ORIGINS = setOf(
+    "https://www.messenger.com",
+    "https://messenger.com",
+    "https://www.facebook.com",
+    "https://m.facebook.com"
+)
+
+private fun createSecureWebChromeClient(getCallState: () -> Boolean): WebChromeClient {
+    return object : WebChromeClient() {
+        override fun onPermissionRequest(request: PermissionRequest) {
+            val originUrl = request.origin.toString().lowercase().trimEnd('/')
+            val isTrusted = TRUSTED_WEBRTC_ORIGINS.any { trusted ->
+                originUrl == trusted || originUrl.startsWith("$trusted/")
+            }
+            if (!isTrusted) {
+                request.deny()
+                return
+            }
+
+            val resources = request.resources
+            val hasAudioOrVideo = resources.any {
+                it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
+                    it == PermissionRequest.RESOURCE_VIDEO_CAPTURE
+            }
+            if (!hasAudioOrVideo) {
+                request.deny()
+                return
+            }
+
+            if (!getCallState()) {
+                request.deny()
+                return
+            }
+
+            request.grant(resources)
+        }
+    }
+}
+
+private const val CALL_INTENT_DETECTOR_SCRIPT = """
+(function() {
+  if (window.__nobookCallDetectorActive) return;
+  window.__nobookCallDetectorActive = true;
+
+  document.addEventListener('click', function(e) {
+    var target = e.target.closest ? e.target.closest(
+      'div[aria-label*="call" i], div[aria-label*="goi" i], button[aria-label*="call" i], button[aria-label*="goi" i]'
+    ) : null;
+    if (target) {
+      var label = (target.getAttribute('aria-label') || '').toLowerCase();
+      var isEndCall = label.indexOf('end') !== -1 || label.indexOf('ket thuc') !== -1;
+      if (window.CallStateBridge && window.CallStateBridge.notifyCallIntent) {
+        if (isEndCall) {
+          window.CallStateBridge.notifyCallIntent(false);
+        } else {
+          window.CallStateBridge.notifyCallIntent(true);
+          setTimeout(function() {
+            window.CallStateBridge.notifyCallIntent(false);
+          }, 30000);
+        }
+      }
+    }
+  }, true);
+
+  console.info('[Nobook] Call-intent detector active (Zero-Trust media gate)');
+})();
+"""
 
 private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 (function() {
@@ -559,18 +638,58 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
   };
 
   const collectPostMediaUrlsAsync = (container, callback) => {
-    let attempts = 0;
-    const tryCollect = () => {
-      attempts += 1;
-      const urls = collectPostMediaUrls(container);
-      const rawImgCount = container ? container.querySelectorAll('img[src*="fbcdn"]').length : 0;
-      if (urls.length < 2 && rawImgCount > urls.length && attempts < 4) {
-        setTimeout(() => requestAnimationFrame(tryCollect), 120);
-      } else {
-        callback(urls);
-      }
+    if (!container) { callback([]); return; }
+
+    const IDLE_MS = 800;
+    const MAX_WAIT_MS = 3000;
+    let idleTimer = null;
+    let finished = false;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(idleTimer);
+      clearTimeout(maxTimer);
+      observer.disconnect();
+      callback(collectPostMediaUrls(container));
     };
-    requestAnimationFrame(tryCollect);
+
+    const maxTimer = setTimeout(finish, MAX_WAIT_MS);
+
+    const observer = new MutationObserver((mutations) => {
+      const hasNewMedia = mutations.some((mutation) => {
+        if (mutation.type === "childList") {
+          return Array.from(mutation.addedNodes).some((node) =>
+            node.nodeType === 1 && (node.tagName === "IMG" || node.tagName === "VIDEO" ||
+              (node.querySelector && node.querySelector("img, video")))
+          );
+        }
+        if (mutation.type === "attributes") {
+          return mutation.target && (mutation.target.tagName === "IMG" || mutation.target.tagName === "VIDEO") &&
+            (mutation.attributeName === "src" || mutation.attributeName === "srcset");
+        }
+        return false;
+      });
+      if (hasNewMedia) {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(finish, IDLE_MS);
+      }
+    });
+
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "srcset"]
+    });
+
+    try {
+      if (container.scrollHeight > container.clientHeight) {
+        container.scrollTop = container.scrollHeight;
+      }
+    } catch (e) { /* ignore: some containers are not scrollable */ }
+
+    idleTimer = setTimeout(finish, IDLE_MS);
   };
 
   const MODAL_ID = "nobook-album-choice-modal";
@@ -1007,45 +1126,6 @@ private const val LINK_CLEANER_SCRIPT = """
     console.info('[Nobook] Link cleaner active (ClearURLs-style tracking + affiliate + redirect-wrapper stripping)');
   } catch (err) {
     console.error('[Nobook] Link cleaner injection failed:', err);
-  }
-})();
-"""
-
-private const val ANTI_EAVESDROPPING_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookPrivacyGuardActive) return;
-    window.__nobookPrivacyGuardActive = true;
-
-    if (navigator.mediaDevices) {
-      navigator.mediaDevices.getUserMedia = function () {
-        console.warn('[Nobook Privacy Guard] Blocked getUserMedia (camera/mic disabled by design).');
-        return Promise.reject(new DOMException('Permission denied by Nobook Privacy Guard', 'NotAllowedError'));
-      };
-      if (navigator.mediaDevices.getDisplayMedia) {
-        navigator.mediaDevices.getDisplayMedia = function () {
-          console.warn('[Nobook Privacy Guard] Blocked getDisplayMedia.');
-          return Promise.reject(new DOMException('Permission denied by Nobook Privacy Guard', 'NotAllowedError'));
-        };
-      }
-    }
-
-    if (navigator.getUserMedia) {
-      navigator.getUserMedia = function (constraints, successCb, errorCb) {
-        console.warn('[Nobook Privacy Guard] Blocked legacy getUserMedia.');
-        if (typeof errorCb === 'function') {
-          errorCb(new DOMException('Permission denied by Nobook Privacy Guard', 'NotAllowedError'));
-        }
-      };
-    }
-
-    try { window.RTCPeerConnection = undefined; } catch (e) { /* ignore */ }
-    try { window.webkitRTCPeerConnection = undefined; } catch (e) { /* ignore */ }
-    try { window.mozRTCPeerConnection = undefined; } catch (e) { /* ignore */ }
-
-    console.info('[Nobook] Privacy guard active (camera/microphone/WebRTC fully disabled)');
-  } catch (err) {
-    console.error('[Nobook] Privacy guard injection failed:', err);
   }
 })();
 """
@@ -1826,7 +1906,7 @@ fun NobookWebView(
 
     LaunchedEffect(loadingState) {
         if (loadingState is LoadingState.Finished) {
-            navigator.evaluateJavaScript(ANTI_EAVESDROPPING_SCRIPT) {}
+            navigator.evaluateJavaScript(CALL_INTENT_DETECTOR_SCRIPT) {}
         }
     }
 
@@ -2008,6 +2088,8 @@ fun NobookWebView(
         onDispose { VideoPlaybackBridge.onPlaybackChanged = null }
     }
 
+    var isUserCalling by remember { mutableStateOf(false) }
+
     val barsInsets = WindowInsets.systemBars.asPaddingValues()
     val imeHeight = rememberImeHeight()
 
@@ -2032,6 +2114,8 @@ fun NobookWebView(
         onCreated = { webView ->
 
             android.webkit.WebView.setWebContentsDebuggingEnabled(true)
+
+            webView.webChromeClient = createSecureWebChromeClient { isUserCalling }
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
@@ -2073,6 +2157,10 @@ fun NobookWebView(
                 addJavascriptInterface(
                     VideoPlaybackBridge,
                     "NobookVideoBridge"
+                )
+                addJavascriptInterface(
+                    CallStateBridge { isCalling -> isUserCalling = isCalling },
+                    "CallStateBridge"
                 )
 
                 setLayerType(View.LAYER_TYPE_HARDWARE, null)
