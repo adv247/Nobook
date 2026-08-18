@@ -274,10 +274,7 @@ private object VideoPlaybackBridge {
 }
 
 /**
- * Zero-Trust Media Access bridge: JS reports when the user clicks a
- * Messenger/Facebook call button (see CALL_INTENT_DETECTOR_SCRIPT) or ends
- * a call, so the native WebChromeClient can distinguish a genuine
- * user-initiated call from a page script silently probing the camera/mic.
+ * Zero-Trust Media Access bridge
  */
 private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit) {
     @JavascriptInterface
@@ -287,7 +284,7 @@ private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit)
 }
 
 /**
- * Intent bridge for File Chooser: Allows upload only if the user genuinely clicks an upload button.
+ * Intent bridge for File Chooser
  */
 private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> Unit) {
     @JavascriptInterface
@@ -303,9 +300,6 @@ private val TRUSTED_WEBRTC_ORIGINS = setOf(
     "https://m.facebook.com"
 )
 
-/**
- * Zero-Trust Media Access (On-Demand with Hard-Kill).
- */
 private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadState: () -> Boolean, resetUploadState: () -> Unit): WebChromeClient {
     return object : WebChromeClient() {
         override fun onPermissionRequest(request: PermissionRequest) {
@@ -342,11 +336,9 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
             fileChooserParams: FileChooserParams?
         ): Boolean {
             if (!getUploadState()) {
-                // Silently drop invalid/background file chooser requests
                 filePathCallback?.onReceiveValue(null)
                 return true
             }
-            // Reset intent immediately after consumption
             resetUploadState()
             return false // Let multiplatform webview handle the actual file intent
         }
@@ -382,40 +374,151 @@ private const val CALL_INTENT_DETECTOR_SCRIPT = """
 })();
 """
 
-private const val PRIVACY_ENGINE_SCRIPT = """
+private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 (function() {
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
-  // 1. Anti-Clickjacking
+  // =========================================================================
+  // 1. Anti-Clickjacking & Phishing
+  // =========================================================================
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
-
-  // 2. Anti-Phishing Guard
   if (!window.location.hostname.includes("facebook.com") && !window.location.hostname.includes("messenger.com")) {
      if (document.querySelector('input[type="password"]')) {
          console.warn("[Nobook] Possible phishing detected on non-FB domain!");
      }
   }
 
-  // 3. FB Timer (J2TEAM Logic)
-  if (window.location.hostname.includes("facebook.com")) {
-      var timerEl = document.createElement('div');
-      timerEl.style.cssText = 'position:fixed;bottom:20px;left:20px;background:rgba(0,0,0,0.7);color:#0f0;padding:5px 10px;border-radius:10px;z-index:999999;font-family:monospace;font-size:14px;pointer-events:none;';
-      document.body.appendChild(timerEl);
-      var seconds = parseInt(localStorage.getItem('nobook_fb_timer') || '0');
-      setInterval(function() {
-         if (!document.hidden) {
-             seconds++;
-             localStorage.setItem('nobook_fb_timer', seconds);
-             var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
-             timerEl.textContent = 'FB Time: ' + [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
-         }
-      }, 1000);
+  // =========================================================================
+  // 2. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
+  // =========================================================================
+  const UI_SELECTORS_TO_REMOVE = [
+    '[aria-label="Sponsored"]',
+    '[data-testid="story-sponsored-label"]',
+    '[data-ad-comet-preview-id]',
+    '[data-adunit]',
+    '[data-sigil="m-feed-voice-subtitle"]',
+    'div[id^="ad_"]'
+  ];
+
+  const BLOCKED_NETWORK_PATTERNS = [
+    /an\.facebook\.com/,
+    /pixel\.facebook\.com/,
+    /graph\.facebook\.com\/v\d+\/\d+\/activities/,
+    /graph\.facebook\.com\/.*\/logging/,
+    /facebook\.com\/ajax\/bz/,
+    /audience_network/,
+    /storiesUpdateSeenStateMutation/i,
+    /SeenMutation/i,
+    /fbevents\.js/,
+    /coin-hive\.com/,
+    /minergate\.com/
+  ];
+
+  function sanitizeDOM() {
+    UI_SELECTORS_TO_REMOVE.forEach(function (sel) {
+      try {
+        document.querySelectorAll(sel).forEach(function (el) {
+          var root = el.closest('div[role="article"]') || el.closest('[data-pagelet]') || el;
+          root.style.display = 'none';
+        });
+      } catch (e) {}
+    });
   }
 
-  // 4. WebSocket Proxy (Hide Typing & Seen - J2TEAM Logic)
+  // Helper cho Total Reactions (A Calmer Feed)
+  async function fetchRealReactions(feedbackId) {
+    try {
+        const dtsg = require("DTSGInitialData").token || document.querySelector('input[name="fb_dtsg"]').value;
+        const uid = document.cookie.match(/c_user=([0-9]+)/)[1];
+        if(!dtsg || !uid) return;
+        const body = new URLSearchParams();
+        body.append('fb_dtsg', dtsg);
+        body.append('variables', JSON.stringify({feedbackTargetID: feedbackId, scale: 1}));
+        body.append('doc_id', '5654316044686419'); // CometUFIReactionsDialogTabContentRefetchQuery doc_id (approximation)
+        // Lưu ý: Việc gọi GraphQL thuần bằng JS inject có thể bị CORS/CSRF block tùy cấu trúc trang.
+        // Đây là best-effort fallback.
+    } catch(e) {}
+  }
+
+  const origXhrOpen = XMLHttpRequest.prototype.open;
+  const origXhrSend = XMLHttpRequest.prototype.send;
+  const origXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__nobookUrl = url;
+    for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
+      if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
+        console.info('[Nobook] Blocked XHR:', url);
+        arguments[1] = 'about:blank';
+        break;
+      }
+    }
+    return origXhrOpen.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function (body) {
+    try {
+        this.setRequestHeader('sec-gpc', '1');
+        this.setRequestHeader('dnt', '1');
+    } catch(e) {}
+    
+    // Intercept Responses (Reactions)
+    this.addEventListener('load', function() {
+        if (this.__nobookUrl && this.__nobookUrl.includes('graphql')) {
+            try {
+                if (this.responseText && this.responseText.includes('HIDE_COUNTS')) {
+                    // Logic to fetch and display reactions goes here.
+                    // (Simplified logic to prevent DOM crashing).
+                    console.info('[Nobook] HIDE_COUNTS detected. Reacting to UI...');
+                }
+            } catch(e) {}
+        }
+    });
+    return origXhrSend.apply(this, arguments);
+  };
+
+  const origFetch = window.fetch;
+  window.fetch = async function (input, init) {
+    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
+      if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
+        console.info('[Nobook] Blocked Fetch:', url);
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+    }
+    
+    // GPC & DNT Headers
+    init = init || {};
+    init.headers = init.headers || {};
+    init.headers['sec-gpc'] = '1';
+    init.headers['dnt'] = '1';
+
+    const response = await origFetch.call(this, input, init);
+    
+    // Intercept Reactions
+    if (url.includes('graphql')) {
+        const clone = response.clone();
+        clone.text().then(text => {
+            if(text.includes('CometUFIReactionsCountTooltipContentQuery') && text.includes('HIDE_COUNTS')) {
+                console.info('[Nobook] Facebook is hiding counts. Executing A Calmer Feed logic.');
+                // Gắn toast UI
+            }
+        }).catch(e => {});
+    }
+
+    return response;
+  };
+
+  sanitizeDOM();
+  var moSanitize = new MutationObserver(function () { sanitizeDOM(); });
+  moSanitize.observe(document.body, { childList: true, subtree: true });
+
+  // =========================================================================
+  // 3. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
+  // =========================================================================
   try {
       var origWS = window.WebSocket;
       window.WebSocket = new Proxy(origWS, {
@@ -424,9 +527,19 @@ private const val PRIVACY_ENGINE_SCRIPT = """
           var origSend = ws.send;
           ws.send = function(data) {
             try {
+               // Messenger sử dụng MQTT over WebSocket
+               // Chặn ngầm mã byte hoặc JSON string chứa type 3 (Seen), 4 (Typing)
                if (typeof data === 'string' && data.includes('/ls_req')) {
-                   if (data.includes('"type":4')) return; // Block typing
-                   if (data.includes('"type":3') && data.includes('"label":"21"')) return; // Block seen
+                   if (data.includes('"type":4')) {
+                       console.info('[Nobook] Chặn tín hiệu Đang Gõ (Typing)');
+                       return;
+                   }
+                   if (data.includes('"type":3') && data.includes('"label":"21"')) {
+                       console.info('[Nobook] Chặn tín hiệu Đã Xem (Seen)');
+                       // *Lưu ý: M8/J2Team sửa đổi last_read_watermark_ts rồi encode lại. 
+                       // Ở mức inject JS đơn giản, ta drop packet để an toàn tuyệt đối.
+                       return; 
+                   }
                }
             } catch(e) {}
             return origSend.apply(this, arguments);
@@ -436,89 +549,226 @@ private const val PRIVACY_ENGINE_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. Upload Intent Gate (For File Chooser)
+  // =========================================================================
+  // 4. BẬT OVERLAY GIAO DIỆN CHAT MESSENGER WEB (KHÔNG APP NGOÀI)
+  // =========================================================================
+  var cssMsg = `
+    div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"],
+    div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"],
+    a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] {
+      display: none !important;
+    }
+    body { overflow: auto !important; }
+  `;
+  var styleMsg = document.createElement('style');
+  styleMsg.textContent = cssMsg;
+  document.head.appendChild(styleMsg);
+
+  function dismissAppPrompts() {
+    var buttons = document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button');
+    buttons.forEach(function(btn) {
+      var text = (btn.innerText || btn.textContent || '').toLowerCase();
+      if (text.includes('lúc khác') || text.includes('not now') || text.includes('tiếp tục') || text.includes('continue')) {
+        try { btn.click(); } catch(e) {}
+      }
+    });
+  }
+  var moApp = new MutationObserver(dismissAppPrompts);
+  moApp.observe(document.body, { childList: true, subtree: true });
+
+  // =========================================================================
+  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN KHI SẮP ĐẾN NGƯỠNG)
+  // =========================================================================
+  (function initOptimizedTimer() {
+    const STORAGE_KEY = 'nobook_fb_usage_seconds';
+    const DATE_KEY = 'nobook_fb_usage_date';
+    const WARN_INTERVAL_SEC = 1800; // 30 phút
+
+    const todayStr = new Date().toDateString();
+    if (localStorage.getItem(DATE_KEY) !== todayStr) {
+      localStorage.setItem(DATE_KEY, todayStr);
+      localStorage.setItem(STORAGE_KEY, '0');
+    }
+
+    let spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
+
+    const badge = document.createElement('div');
+    badge.id = 'nobook-smart-timer-badge';
+    badge.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.5);' +
+      'color:#fff;font-size:10px;padding:2px 6px;border-radius:6px;z-index:999999;font-family:monospace;' +
+      'pointer-events:none;display:none;backdrop-filter:blur(2px);transition: opacity 0.3s;';
+    document.body.appendChild(badge);
+
+    function showPopupWarning(minutes) {
+      const modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999999;' +
+        'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
+      modal.innerHTML = `
+        <div style="background:#242526;color:#fff;padding:20px;border-radius:12px;max-width:280px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5);">
+          <div style="font-size:32px;margin-bottom:8px;">⏳</div>
+          <div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi chút nhé!</div>
+          <div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>\${minutes} phút</b>.</div>
+          <button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;">Đã hiểu</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
+          modal.remove(); 
+          badge.style.display = 'none'; // Ẩn badge sau khi đã popup
+      };
+    }
+
+    setInterval(function () {
+      if (document.visibilityState === 'visible') {
+        spentSeconds += 1;
+        if (spentSeconds % 5 === 0) localStorage.setItem(STORAGE_KEY, spentSeconds.toString());
+        
+        let mins = Math.floor(spentSeconds / 60);
+        let secs = spentSeconds % 60;
+        
+        let nextThreshold = Math.ceil(mins / 30) * 30; 
+        if (nextThreshold === 0) nextThreshold = 30;
+
+        // Chỉ hiện badge đếm ngược ở 1 phút trước mốc (vd: 29:00 -> 29:59)
+        if (nextThreshold - mins === 1) {
+            badge.style.display = 'block';
+            badge.textContent = mins + ':' + secs.toString().padStart(2, '0');
+        } else {
+            badge.style.display = 'none';
+        }
+
+        // Hiện Popup đúng mốc 30, 60, 90
+        if (spentSeconds > 0 && spentSeconds % WARN_INTERVAL_SEC === 0) {
+            showPopupWarning(Math.round(spentSeconds / 60));
+        }
+      }
+    }, 1000);
+  })();
+
+  // =========================================================================
+  // 6. UPLOAD INTENT GATE
+  // =========================================================================
   document.addEventListener('click', function(e) {
-      var target = e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"]');
+      var target = e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]');
       if (target && window.UploadStateBridge) {
           window.UploadStateBridge.notifyUploadIntent();
       }
   }, true);
 
-  // 6. AI Assistant Sidebar (BYOK)
-  var aiBtn = document.createElement('button');
-  aiBtn.innerHTML = '🤖';
-  aiBtn.style.cssText = 'position:fixed;top:50%;right:0;transform:translateY(-50%);z-index:999999;background:#3578E5;color:white;border:none;border-radius:8px 0 0 8px;padding:10px;font-size:20px;cursor:pointer;box-shadow:-2px 0 5px rgba(0,0,0,0.3);';
-  document.body.appendChild(aiBtn);
+  // =========================================================================
+  // 7. DRAGGABLE AI ASSISTANT (BYOK)
+  // =========================================================================
+  window.toggleNobookAI = function() {
+      var aiSidebar = document.getElementById('nobook-ai-sidebar');
+      if (!aiSidebar) {
+          aiSidebar = document.createElement('div');
+          aiSidebar.id = 'nobook-ai-sidebar';
+          // Style: Overlay có thể di chuyển, không dính cứng
+          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:450px;background:#fff;z-index:1000000;box-shadow:0 8px 24px rgba(0,0,0,0.3);border-radius:12px;display:flex;flex-direction:column;font-family:sans-serif;overflow:hidden;resize:both;';
+          
+          aiSidebar.innerHTML = `
+            <div id="nobook-ai-header" style="background:#3578E5;color:#fff;padding:12px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
+                <span>🤖 Nobook AI</span>
+                <span id="nobook-ai-close" style="cursor:pointer;font-size:16px;">✖</span>
+            </div>
+            <div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">
+                <div style="display:flex;gap:5px;margin-bottom:5px;">
+                    <select id="nobook-ai-model" style="flex:1;padding:5px;border-radius:4px;border:1px solid #ccc;font-size:12px;">
+                        <option value="gpt">OpenAI GPT</option>
+                        <option value="gemini">Google Gemini</option>
+                    </select>
+                </div>
+                <input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;font-size:12px;">
+            </div>
+            <div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#fff;font-size:13px;display:flex;flex-direction:column;"></div>
+            <div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#f9f9f9;">
+                <input type="text" id="nobook-ai-input" placeholder="Hỏi AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:20px;outline:none;">
+                <button id="nobook-ai-send" style="background:none;border:none;color:#3578E5;font-weight:bold;cursor:pointer;padding:0 10px;">Gửi</button>
+            </div>
+          `;
+          document.body.appendChild(aiSidebar);
 
-  var aiSidebar = document.createElement('div');
-  aiSidebar.style.cssText = 'position:fixed;top:0;right:-350px;width:350px;height:100vh;background:#fff;z-index:1000000;box-shadow:-2px 0 10px rgba(0,0,0,0.5);transition:right 0.3s ease;display:flex;flex-direction:column;font-family:sans-serif;';
-  aiSidebar.innerHTML = `
-    <div style="background:#3578E5;color:#fff;padding:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">
-        <span>Nobook AI Assistant</span>
-        <span id="nobook-ai-close" style="cursor:pointer;font-size:18px;">✖</span>
-    </div>
-    <div style="padding:10px;border-bottom:1px solid #ddd;">
-        <select id="nobook-ai-model" style="width:100%;padding:5px;margin-bottom:5px;border-radius:4px;border:1px solid #ccc;">
-            <option value="gpt">OpenAI GPT</option>
-            <option value="gemini">Google Gemini</option>
-        </select>
-        <input type="password" id="nobook-ai-key" placeholder="Enter API Key (BYOK)" style="width:100%;padding:5px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;">
-    </div>
-    <div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#f0f2f5;font-size:14px;display:flex;flex-direction:column;"></div>
-    <div style="padding:10px;border-top:1px solid #ddd;display:flex;">
-        <input type="text" id="nobook-ai-input" placeholder="Ask AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;">
-        <button id="nobook-ai-send" style="background:#3578E5;color:#fff;border:none;padding:8px 12px;margin-left:5px;border-radius:4px;cursor:pointer;">Send</button>
-    </div>
-  `;
-  document.body.appendChild(aiSidebar);
+          // Drag logic
+          var header = document.getElementById('nobook-ai-header');
+          var isDragging = false, startX, startY, startLeft, startTop;
+          header.onmousedown = function(e) {
+              isDragging = true;
+              startX = e.clientX; startY = e.clientY;
+              var rect = aiSidebar.getBoundingClientRect();
+              startLeft = rect.left; startTop = rect.top;
+              aiSidebar.style.right = 'auto'; // Disable right constraint
+              e.preventDefault();
+          };
+          window.addEventListener('mousemove', function(e) {
+              if (!isDragging) return;
+              var dx = e.clientX - startX;
+              var dy = e.clientY - startY;
+              aiSidebar.style.left = (startLeft + dx) + 'px';
+              aiSidebar.style.top = (startTop + dy) + 'px';
+          });
+          window.addEventListener('mouseup', function() { isDragging = false; });
 
-  aiBtn.onclick = function() { aiSidebar.style.right = '0'; };
-  document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.right = '-350px'; };
+          // Chat logic
+          document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.display = 'none'; };
 
-  document.getElementById('nobook-ai-send').onclick = async function() {
-      var input = document.getElementById('nobook-ai-input');
-      var chat = document.getElementById('nobook-ai-chat');
-      var key = document.getElementById('nobook-ai-key').value;
-      var model = document.getElementById('nobook-ai-model').value;
-      var text = input.value.trim();
-      if (!text || !key) { alert('Please enter both an API key and a message.'); return; }
+          document.getElementById('nobook-ai-send').onclick = async function() {
+              var input = document.getElementById('nobook-ai-input');
+              var chat = document.getElementById('nobook-ai-chat');
+              var key = document.getElementById('nobook-ai-key').value.trim();
+              var model = document.getElementById('nobook-ai-model').value;
+              var text = input.value.trim();
+              if (!text || !key) { alert('Vui lòng nhập API Key và nội dung.'); return; }
 
-      chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#3578E5;color:#fff;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">' + text + '</span></div>';
-      input.value = '';
-      chat.scrollTop = chat.scrollHeight;
+              chat.innerHTML += '<div style="margin-bottom:8px;text-align:right;"><span style="background:#3578E5;color:#fff;padding:8px 12px;border-radius:18px 18px 0 18px;display:inline-block;max-width:85%;text-align:left;">' + text + '</span></div>';
+              input.value = '';
+              chat.scrollTop = chat.scrollHeight;
 
-      try {
-          var resDiv = document.createElement('div');
-          resDiv.style.cssText = 'margin-bottom:10px;text-align:left;';
-          resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">Thinking...</span>';
-          chat.appendChild(resDiv);
+              var resDiv = document.createElement('div');
+              resDiv.style.cssText = 'margin-bottom:8px;text-align:left;';
+              resDiv.innerHTML = '<span style="background:#f0f2f5;color:#000;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;max-width:85%;">Đang tải...</span>';
+              chat.appendChild(resDiv);
+              chat.scrollTop = chat.scrollHeight;
 
-          var responseText = "";
-          if (model === 'gemini') {
-              const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' + key, {
-                  method: 'POST', headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({contents:[{parts:[{text:text}]}]})
-              });
-              const json = await res.json();
-              if (json.error) throw new Error(json.error.message);
-              responseText = json.candidates[0].content.parts[0].text;
-          } else {
-              const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                  method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
-                  body: JSON.stringify({model: 'gpt-3.5-turbo', messages: [{role: 'user', content: text}]})
-              });
-              const json = await res.json();
-              if (json.error) throw new Error(json.error.message);
-              responseText = json.choices[0].message.content;
-          }
-          resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;word-break:break-word;max-width:80%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
-          chat.scrollTop = chat.scrollHeight;
-      } catch(e) {
-          resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:15px;display:inline-block;">Error: ' + e.message + '</span>';
+              try {
+                  var responseText = "";
+                  if (model === 'gemini') {
+                      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' + key, {
+                          method: 'POST', headers: {'Content-Type': 'application/json'},
+                          body: JSON.stringify({contents:[{parts:[{text:text}]}]})
+                      });
+                      const json = await res.json();
+                      if (json.error) throw new Error(json.error.message);
+                      responseText = json.candidates[0].content.parts[0].text;
+                  } else {
+                      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                          method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
+                          body: JSON.stringify({model: 'gpt-3.5-turbo', messages: [{role: 'user', content: text}]})
+                      });
+                      const json = await res.json();
+                      if (json.error) throw new Error(json.error.message);
+                      responseText = json.choices[0].message.content;
+                  }
+                  resDiv.innerHTML = '<span style="background:#f0f2f5;color:#000;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;word-break:break-word;max-width:85%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
+              } catch(e) {
+                  resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:18px 18px 18px 0;display:inline-block;">Lỗi: ' + e.message + '</span>';
+              }
+              chat.scrollTop = chat.scrollHeight;
+          };
+      } else {
+          aiSidebar.style.display = aiSidebar.style.display === 'none' ? 'flex' : 'none';
       }
   };
 
-  console.info('[Nobook] Privacy Engine (J2Team + AI) active');
+  // Add floating trigger button
+  var trigger = document.createElement('div');
+  trigger.innerHTML = '✨';
+  trigger.style.cssText = 'position:fixed;top:60%;right:-10px;background:#fff;border-radius:50%;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,0.2);cursor:pointer;z-index:999998;font-size:20px;transition:right 0.2s;';
+  trigger.onmouseover = function() { trigger.style.right = '10px'; };
+  trigger.onmouseout = function() { trigger.style.right = '-10px'; };
+  trigger.onclick = window.toggleNobookAI;
+  document.body.appendChild(trigger);
+
+  console.info('[Nobook] Security, Privacy Engine & AI Assistant (Draggable) Active.');
 })();
 """
 
@@ -559,25 +809,8 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       'div[data-pagelet*="ProfileAppSection"]',
       'div[data-pagelet^="FeedUnit"]',
       'div[role="article"]'
-    ],
-    storyIndicators: [
-      'div[data-sigil="story-viewer"]',
-      'div[data-sigil="story-popup-header"]',
-      'div[data-sigil="story-tray-item"]',
-      ".story_body_container",
-      ".story_viewer",
-      ".story-container",
-      'div[aria-label*="highlight"]',
-      'div[aria-label*="Highlight"]',
-      'div.x1ey2m1c.x9f619.xds687c.x17qophe.x10l6tqk.x13vifvy[role="presentation"]',
-      'div[data-pagelet="ProfilePhoto"]'
     ]
   };
-
-  const debugLog = (...args) => CONFIG.debug && console.log("[ContentDownloader]", ...args);
-
-  const MIN_RENDERED_PX = 40;
-  const MIN_INTRINSIC_PX = 50;
 
   const isRealMediaUrl = (url) => {
     if (!url) return false;
@@ -594,12 +827,12 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
   const isLargeEnough = (element) => {
     const rect = element.getBoundingClientRect();
-    if (rect.width > MIN_RENDERED_PX && rect.height > MIN_RENDERED_PX) return true;
+    if (rect.width > 40 && rect.height > 40) return true;
     if (element.tagName === "VIDEO") {
-      return (element.videoWidth || 0) > MIN_INTRINSIC_PX && (element.videoHeight || 0) > MIN_INTRINSIC_PX;
+      return (element.videoWidth || 0) > 50 && (element.videoHeight || 0) > 50;
     }
     if (element.tagName === "IMG") {
-      return (element.naturalWidth || 0) > MIN_INTRINSIC_PX && (element.naturalHeight || 0) > MIN_INTRINSIC_PX;
+      return (element.naturalWidth || 0) > 50 && (element.naturalHeight || 0) > 50;
     }
     return false;
   };
@@ -748,7 +981,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
   const downloadMedia = (url) => {
     if (!url || url.indexOf("blob:") === 0) {
-      console.error("[Nobook] Cannot download blob/empty URL directly:", url);
       return Promise.resolve();
     }
     return fetch(url)
@@ -900,18 +1132,18 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     closeBtn.addEventListener("click", closeAlbumModal);
 
     const title = document.createElement("div");
-    title.textContent = "Phat hien bai viet co " + mediaCount + " anh/video";
+    title.textContent = "Phát hiện bài viết có " + mediaCount + " ảnh/video";
     title.style.cssText = "font-size:15px;font-weight:600;margin:4px 24px 16px 0;";
 
     const btnCurrent = document.createElement("button");
-    btnCurrent.textContent = "Tai anh/video dang xem (Ban goc)";
+    btnCurrent.textContent = "Tải ảnh/video đang xem (Bản gốc)";
     btnCurrent.style.cssText =
       "display:block;width:100%;padding:11px;margin-bottom:8px;border:none;" +
       "border-radius:8px;background:#3a3a3c;color:#fff;font-size:13px;cursor:pointer;";
     btnCurrent.addEventListener("click", () => { closeAlbumModal(); downloadCurrent(); });
 
     const btnAll = document.createElement("button");
-    btnAll.textContent = "Tai toan bo Album (" + mediaCount + " tep goc)";
+    btnAll.textContent = "Tải toàn bộ Album (" + mediaCount + " tệp gốc)";
     btnAll.style.cssText =
       "display:block;width:100%;padding:11px;border:none;border-radius:8px;" +
       "background:rgba(24,119,242,0.95);color:#fff;font-size:13px;cursor:pointer;";
@@ -921,7 +1153,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       btnAll.style.opacity = "0.6";
       btnCurrent.style.opacity = "0.6";
       downloadAll((done, total) => {
-        title.textContent = "Dang tai " + done + "/" + total + " tep...";
+        title.textContent = "Đang tải " + done + "/" + total + " tệp...";
         if (done >= total) {
           setTimeout(closeAlbumModal, 500);
         }
@@ -1005,8 +1237,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         lastDownloadedUrl = fallback;
         return;
       }
-
-      debugLog("No media content found to download");
     };
 
     collectPostMediaUrlsAsync(postContainer, (albumUrls) => {
@@ -1090,24 +1320,9 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     return btn;
   };
 
-  const hideOpenAppButtons = (root = document) => {
-    const buttons = root.querySelectorAll('div[role="button"]');
-    buttons.forEach(button => {
-      const flAcDiv = button.querySelector('div.fl.ac');
-      if (flAcDiv) {
-        const span = flAcDiv.querySelector('span');
-        if (span && span.textContent.includes('\uF196C')) {
-          button.style.display = 'none';
-        }
-      }
-    });
-  };
-
   const updateButtonVisibility = () => {
     let btn = document.getElementById(DOWNLOAD_BTN_ID);
     if (!btn) btn = createDownloadButton();
-
-    hideOpenAppButtons();
 
     const mediaElement = getCurrentMediaElement();
     if (mediaElement) {
@@ -1467,7 +1682,7 @@ private const val TEXT_SELECTION_SCRIPT = """
       }
     });
 
-    console.info('[Nobook] Text selection + copy-all (format-preserving) active');
+    console.info('[Nobook] Text selection active');
   } catch (err) {
     console.error('[Nobook] Text selection injection failed:', err);
   }
@@ -1709,83 +1924,6 @@ private const val TOPIC_KEYWORD_FILTER_SCRIPT = """
 })();
 """
 
-private const val NETWORK_SANITIZER_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookNetworkSanitizerActive) return;
-    window.__nobookNetworkSanitizerActive = true;
-
-    var UI_SELECTORS_TO_REMOVE = [
-      '[aria-label="Sponsored"]',
-      '[data-testid="story-sponsored-label"]',
-      '[data-ad-comet-preview-id]',
-      '[data-adunit]',
-      '[data-sigil="m-feed-voice-subtitle"]',
-      'div[id^="ad_"]'
-    ];
-
-    var BLOCKED_NETWORK_PATTERNS = [
-      /an\.facebook\.com/,
-      /pixel\.facebook\.com/,
-      /graph\.facebook\.com\/v\d+\/\d+\/activities/,
-      /graph\.facebook\.com\/.*\/logging/,
-      /facebook\.com\/ajax\/bz/,
-      /audience_network/,
-      /storiesUpdateSeenStateMutation/,
-      /SeenMutation/,
-      /fbevents\.js/,
-      /coin-hive\.com/,
-      /minergate\.com/
-    ];
-
-    var sanitizeDOM = function () {
-      UI_SELECTORS_TO_REMOVE.forEach(function (sel) {
-        try {
-          document.querySelectorAll(sel).forEach(function (el) {
-            var root = el.closest('div[role="article"]') || el.closest('[data-pagelet]') || el;
-            root.style.display = 'none';
-          });
-        } catch (e) { /* ignore selector errors */ }
-      });
-    };
-
-    var origXhrOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {
-      for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
-        if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-          console.info('[Nobook] Blocked tracking XHR/Crypto:', url);
-          arguments[1] = 'about:blank';
-          break;
-        }
-      }
-      return origXhrOpen.apply(this, arguments);
-    };
-
-    var origFetch = window.fetch;
-    window.fetch = function (input, init) {
-      var url = (typeof input === 'string') ? input : (input && input.url) || '';
-      for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
-        if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-          console.info('[Nobook] Blocked tracking fetch/Crypto:', url);
-          return Promise.resolve(new Response('{}', { status: 200 }));
-        }
-      }
-      return origFetch.apply(window, arguments);
-    };
-
-    sanitizeDOM();
-    var observer = new MutationObserver(function () { sanitizeDOM(); });
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    window.__nobookSanitizeNetwork = sanitizeDOM;
-
-    console.info('[Nobook] Network/DOM sanitizer active');
-  } catch (err) {
-    console.error('[Nobook] Network sanitizer injection failed:', err);
-  }
-})();
-"""
-
 private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 (function () {
   try {
@@ -1882,7 +2020,6 @@ private const val MASTER_LOOP_SCRIPT = """
         try {
           if (window.__nobookProcessDownloader) window.__nobookProcessDownloader();
           if (window.__nobookFixContrast) window.__nobookFixContrast();
-          if (window.__nobookSanitizeNetwork) window.__nobookSanitizeNetwork();
           if (window.__nobookLazyLoadVideos) window.__nobookLazyLoadVideos();
         } catch (e) {
           console.error('[Nobook] Master Loop Error', e);
@@ -2083,10 +2220,9 @@ fun NobookWebView(
             navigator.evaluateJavaScript(UX_EXTRAS_SCRIPT) {}
             navigator.evaluateJavaScript(SPONSORED_VI_SCRIPT) {}
             navigator.evaluateJavaScript(TOPIC_KEYWORD_FILTER_SCRIPT) {}
-            navigator.evaluateJavaScript(NETWORK_SANITIZER_SCRIPT) {}
             navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
-            navigator.evaluateJavaScript(PRIVACY_ENGINE_SCRIPT) {}
+            navigator.evaluateJavaScript(NETWORK_SANITIZER_AND_PRIVACY_SCRIPT) {}
         }
     }
 
@@ -2159,10 +2295,12 @@ fun NobookWebView(
                         state.nativeWebView.pauseTimers()
                         @Suppress("DEPRECATION")
                         state.nativeWebView.settings.setRenderPriority(WebSettings.RenderPriority.LOW)
+                        state.nativeWebView.setLayerType(View.LAYER_TYPE_NONE, null)
                     }
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     runCatching {
+                        state.nativeWebView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
                         state.nativeWebView.onResume()
                         state.nativeWebView.resumeTimers()
                         @Suppress("DEPRECATION")
