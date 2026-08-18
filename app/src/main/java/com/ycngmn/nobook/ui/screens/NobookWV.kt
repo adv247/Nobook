@@ -379,7 +379,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
+  // =========================================================================
   // 1. Anti-Clickjacking & Phishing
+  // =========================================================================
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
@@ -389,7 +391,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
      }
   }
 
-  // 2. J2TEAM Engine & DOM Sanitization
+  // =========================================================================
+  // 2. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
+  // =========================================================================
   var UI_SELECTORS_TO_REMOVE = [
     '[aria-label="Sponsored"]',
     '[data-testid="story-sponsored-label"]',
@@ -426,7 +430,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
   var origXhrOpen = XMLHttpRequest.prototype.open;
   var origXhrSend = XMLHttpRequest.prototype.send;
-  var origXhrSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
 
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__nobookUrl = url;
@@ -495,7 +498,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   var moSanitize = new MutationObserver(function () { sanitizeDOM(); });
   moSanitize.observe(document.body, { childList: true, subtree: true });
 
+  // =========================================================================
   // 3. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
+  // =========================================================================
   try {
       var origWS = window.WebSocket;
       window.WebSocket = new Proxy(origWS, {
@@ -522,36 +527,13 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 4. BẬT OVERLAY GIAO DIỆN CHAT MESSENGER WEB
-  var cssMsg = '' +
-    'div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"], ' +
-    'div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"], ' +
-    'a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] { ' +
-      'display: none !important; ' +
-    '} ' +
-    'body { overflow: auto !important; }';
-    
-  var styleMsg = document.createElement('style');
-  styleMsg.textContent = cssMsg;
-  document.head.appendChild(styleMsg);
-
-  function dismissAppPrompts() {
-    var buttons = document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button');
-    buttons.forEach(function(btn) {
-      var text = (btn.innerText || btn.textContent || '').toLowerCase();
-      if (text.indexOf('lúc khác') !== -1 || text.indexOf('not now') !== -1 || text.indexOf('tiếp tục') !== -1 || text.indexOf('continue') !== -1) {
-        try { btn.click(); } catch(e) {}
-      }
-    });
-  }
-  var moApp = new MutationObserver(dismissAppPrompts);
-  moApp.observe(document.body, { childList: true, subtree: true });
-
-  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ)
+  // =========================================================================
+  // 4. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN 1 PHÚT TRƯỚC NGƯỠNG)
+  // =========================================================================
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
-    var WARN_INTERVAL_SEC = 1800; 
+    var WARN_INTERVAL_SEC = 1800; // 30 phút
 
     var todayStr = new Date().toDateString();
     if (localStorage.getItem(DATE_KEY) !== todayStr) {
@@ -597,6 +579,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         var nextThreshold = Math.ceil(mins / 30) * 30; 
         if (nextThreshold === 0) nextThreshold = 30;
 
+        // Chỉ hiện badge đếm ngược ở 1 phút trước mốc (vd: 29:00 -> 29:59)
         if (nextThreshold - mins === 1) {
             badge.style.display = 'block';
             var formattedSecs = secs < 10 ? '0' + secs : secs;
@@ -612,7 +595,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }, 1000);
   })();
 
-  // 6. UPLOAD INTENT GATE
+  // =========================================================================
+  // 5. UPLOAD INTENT GATE
+  // =========================================================================
   document.addEventListener('click', function(e) {
       var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
@@ -620,17 +605,19 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // 7. DRAGGABLE AI ASSISTANT (BYOK)
+  // =========================================================================
+  // 6. DRAGGABLE AI ASSISTANT (BYOK) & LAYER 12 COOKIE EXTRACTION
+  // =========================================================================
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
           aiSidebar = document.createElement('div');
           aiSidebar.id = 'nobook-ai-sidebar';
-          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:450px;background:#fff;z-index:1000000;box-shadow:0 8px 24px rgba(0,0,0,0.3);border-radius:12px;display:flex;flex-direction:column;font-family:sans-serif;overflow:hidden;resize:both;';
+          aiSidebar.style.cssText = 'position:fixed;top:50px;right:20px;width:320px;height:480px;background:#fff;z-index:1000000;box-shadow:0 8px 24px rgba(0,0,0,0.3);border-radius:12px;display:flex;flex-direction:column;font-family:sans-serif;overflow:hidden;';
           
           aiSidebar.innerHTML = 
             '<div id="nobook-ai-header" style="background:#3578E5;color:#fff;padding:12px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">' +
-                '<span>🤖 Nobook AI</span>' +
+                '<span>🤖 Nobook Tools & AI</span>' +
                 '<span id="nobook-ai-close" style="cursor:pointer;font-size:16px;">✖</span>' +
             '</div>' +
             '<div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">' +
@@ -641,6 +628,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
                     '</select>' +
                 '</div>' +
                 '<input type="password" id="nobook-ai-key" placeholder="API Key (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;font-size:12px;">' +
+                '<button id="nobook-extract-cookie" style="width:100%;padding:8px;margin-top:8px;background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:bold;">🍪 Trích xuất FB Cookies (Layer 12)</button>' +
             '</div>' +
             '<div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#fff;font-size:13px;display:flex;flex-direction:column;"></div>' +
             '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#f9f9f9;">' +
@@ -649,25 +637,57 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             '</div>';
           document.body.appendChild(aiSidebar);
 
+          // Drag logic
           var header = document.getElementById('nobook-ai-header');
-          var isDragging = false, startX, startY, startLeft, startTop;
+          var isDragging = false, startY = 0, startX = 0, startTop = 0, startLeft = 0;
           header.onmousedown = function(e) {
               isDragging = true;
               startX = e.clientX; startY = e.clientY;
               var rect = aiSidebar.getBoundingClientRect();
               startLeft = rect.left; startTop = rect.top;
-              aiSidebar.style.right = 'auto';
+              aiSidebar.style.right = 'auto'; // Remove right constraint to allow free drag
               e.preventDefault();
+          };
+          header.ontouchstart = function(e) {
+              isDragging = true;
+              startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+              var rect = aiSidebar.getBoundingClientRect();
+              startLeft = rect.left; startTop = rect.top;
+              aiSidebar.style.right = 'auto';
           };
           window.addEventListener('mousemove', function(e) {
               if (!isDragging) return;
-              var dx = e.clientX - startX;
-              var dy = e.clientY - startY;
-              aiSidebar.style.left = (startLeft + dx) + 'px';
-              aiSidebar.style.top = (startTop + dy) + 'px';
-          });
+              aiSidebar.style.left = (startLeft + (e.clientX - startX)) + 'px';
+              aiSidebar.style.top = (startTop + (e.clientY - startY)) + 'px';
+          }, {passive: true});
+          window.addEventListener('touchmove', function(e) {
+              if (!isDragging) return;
+              aiSidebar.style.left = (startLeft + (e.touches[0].clientX - startX)) + 'px';
+              aiSidebar.style.top = (startTop + (e.touches[0].clientY - startY)) + 'px';
+          }, {passive: true});
           window.addEventListener('mouseup', function() { isDragging = false; });
+          window.addEventListener('touchend', function() { isDragging = false; });
 
+          // Cookie Extraction Logic
+          document.getElementById('nobook-extract-cookie').onclick = function() {
+              var cookies = document.cookie;
+              var formatted = "FB Cookies:\n" + cookies.split(';').map(c => c.trim()).join('\n');
+              
+              if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+                  window.ClipboardBridge.copyText(formatted);
+                  alert("Đã sao chép Cookie FB vào bộ nhớ đệm (ClipboardBridge)!");
+              } else if (navigator.clipboard) {
+                  navigator.clipboard.writeText(formatted).then(function() {
+                      alert("Đã sao chép Cookie FB vào Clipboard hệ thống!");
+                  }).catch(function(err) {
+                      alert("Lỗi khi sao chép Cookie: " + err);
+                  });
+              } else {
+                  prompt("Vui lòng copy thủ công Cookie dưới đây:", formatted);
+              }
+          };
+
+          // Chat logic
           document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.display = 'none'; };
 
           document.getElementById('nobook-ai-send').onclick = async function() {
@@ -718,15 +738,119 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  var trigger = document.createElement('div');
-  trigger.innerHTML = '✨';
-  trigger.style.cssText = 'position:fixed;top:60%;right:-10px;background:#fff;border-radius:50%;padding:8px;box-shadow:0 2px 10px rgba(0,0,0,0.2);cursor:pointer;z-index:999998;font-size:20px;transition:right 0.2s;';
-  trigger.onmouseover = function() { trigger.style.right = '10px'; };
-  trigger.onmouseout = function() { trigger.style.right = '-10px'; };
-  trigger.onclick = window.toggleNobookAI;
-  document.body.appendChild(trigger);
+  // Add floating trigger button (Draggable on right side)
+  var aiTrigger = document.createElement('div');
+  aiTrigger.innerHTML = '✨';
+  aiTrigger.style.cssText = 'position:fixed;top:60%;right:0px;background:#fff;border-radius:50% 0 0 50%;padding:10px 10px 10px 15px;box-shadow:-2px 2px 10px rgba(0,0,0,0.2);cursor:move;z-index:999998;font-size:20px;opacity:0.3;transition:opacity 0.3s;';
+  
+  aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
+  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.3'; };
+  
+  var isTriggerDragging = false;
+  var tStartY, tStartTop;
+  
+  aiTrigger.onmousedown = function(e) {
+      isTriggerDragging = true;
+      tStartY = e.clientY;
+      tStartTop = aiTrigger.offsetTop;
+      e.preventDefault();
+  };
+  aiTrigger.ontouchstart = function(e) {
+      isTriggerDragging = true;
+      tStartY = e.touches[0].clientY;
+      tStartTop = aiTrigger.offsetTop;
+  };
+  window.addEventListener('mousemove', function(e) {
+      if (!isTriggerDragging) return;
+      aiTrigger.style.top = (tStartTop + (e.clientY - tStartY)) + 'px';
+  }, {passive: true});
+  window.addEventListener('touchmove', function(e) {
+      if (!isTriggerDragging) return;
+      aiTrigger.style.top = (tStartTop + (e.touches[0].clientY - tStartY)) + 'px';
+  }, {passive: true});
+  window.addEventListener('mouseup', function() { isTriggerDragging = false; });
+  window.addEventListener('touchend', function() { isTriggerDragging = false; });
 
-  console.info('[Nobook] Security, Privacy Engine & AI Assistant (Draggable) Active.');
+  aiTrigger.onclick = function(e) {
+      if (Math.abs(e.clientY - tStartY) < 5) {
+          window.toggleNobookAI(); 
+      }
+  };
+  document.body.appendChild(aiTrigger);
+
+  console.info('[Nobook] Security, Privacy Engine & AI Assistant Active.');
+})();
+"""
+
+private const val MESSENGER_GUARD_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookMessengerGuardActive) return;
+    window.__nobookMessengerGuardActive = true;
+
+    function isMessengerDeepLink(url) {
+      if (!url) return false;
+      var l = String(url).toLowerCase();
+      return l.indexOf("fb-messenger://") === 0 ||
+        (l.indexOf("intent://") === 0 && l.indexOf("messenger") !== -1) ||
+        l.indexOf("com.facebook.orca") !== -1 ||
+        (l.indexOf("market://details") === 0 && l.indexOf("orca") !== -1) ||
+        (l.indexOf("play.google.com/store/apps/details") !== -1 && l.indexOf("com.facebook.orca") !== -1);
+    }
+
+    document.addEventListener("click", function (e) {
+      var el = e.target;
+      var link = el && el.closest ? el.closest("a[href]") : null;
+      
+      // BẮT SỰ KIỆN CLICK VÀO ICON MESSENGER ĐỂ BYPASS TẢI APP TRÊN WEB MOBILE
+      var isMsgIcon = el && el.closest ? el.closest('a[href*="/messages/"], a[aria-label="Messenger"], div[aria-label="Messenger"]') : null;
+      if (isMsgIcon) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        console.info("[Nobook] Chuyển hướng Messenger Web (Bypass ép tải App)");
+        window.location.href = "https://www.facebook.com/messages/";
+        return;
+      }
+
+      if (link && isMessengerDeepLink(link.href)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+      }
+    }, true);
+
+    var origOpen = window.open;
+    window.open = function (url) {
+      if (isMessengerDeepLink(url)) {
+        console.info("[Nobook] Blocked window.open to Messenger deep link:", url);
+        return null;
+      }
+      return origOpen.apply(window, arguments);
+    };
+
+    // ẨN TRIỆT ĐỂ POPUP BẮT TẢI APP MESSENGER TRÊN GIAO DIỆN CHAT (DỰA THEO ẢNH CUNG CẤP)
+    var css = 'div[data-testid="mw_top_banner"], div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], div[aria-label*="Cài đặt Messenger"], div[aria-label*="Tải ứng dụng Messenger"], a[href*="play.google.com/store/apps/details?id=com.facebook.orca"], a[href*="fb-messenger://"] { display: none !important; } body { overflow: auto !important; }';
+    var style = document.createElement('style');
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    function dismissAppPrompts() {
+      var buttons = document.querySelectorAll('div[role="dialog"] div[role="button"], div[role="dialog"] button');
+      buttons.forEach(function(btn) {
+        var text = (btn.innerText || btn.textContent || '').toLowerCase();
+        if (text.indexOf('lúc khác') !== -1 || text.indexOf('not now') !== -1 || text.indexOf('tiếp tục') !== -1 || text.indexOf('continue') !== -1 || text.indexOf('đóng') !== -1 || text.indexOf('close') !== -1) {
+          try { btn.click(); } catch(e) {}
+        }
+      });
+    }
+    var moApp = new MutationObserver(dismissAppPrompts);
+    moApp.observe(document.body, { childList: true, subtree: true });
+
+    console.info("[Nobook] Messenger deep-link guard & Web Bypass active");
+  } catch (err) {
+    console.error("[Nobook] Messenger guard injection failed:", err);
+  }
 })();
 """
 
@@ -1352,48 +1476,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
     document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
-  }
-})();
-"""
-
-private const val MESSENGER_GUARD_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookMessengerGuardActive) return;
-    window.__nobookMessengerGuardActive = true;
-
-    function isMessengerDeepLink(url) {
-      if (!url) return false;
-      var l = String(url).toLowerCase();
-      return l.indexOf("fb-messenger://") === 0 ||
-        (l.indexOf("intent://") === 0 && l.indexOf("messenger") !== -1) ||
-        l.indexOf("com.facebook.orca") !== -1 ||
-        (l.indexOf("market://details") === 0 && l.indexOf("orca") !== -1) ||
-        (l.indexOf("play.google.com/store/apps/details") !== -1 && l.indexOf("com.facebook.orca") !== -1);
-    }
-
-    document.addEventListener("click", function (e) {
-      var el = e.target;
-      var link = el && el.closest ? el.closest("a[href]") : null;
-      if (link && isMessengerDeepLink(link.href)) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-      }
-    }, true);
-
-    var origOpen = window.open;
-    window.open = function (url) {
-      if (isMessengerDeepLink(url)) {
-        console.info("[Nobook] Blocked window.open to Messenger deep link:", url);
-        return null;
-      }
-      return origOpen.apply(window, arguments);
-    };
-
-    console.info("[Nobook] Messenger deep-link guard active");
-  } catch (err) {
-    console.error("[Nobook] Messenger guard injection failed:", err);
   }
 })();
 """
@@ -2230,7 +2312,13 @@ fun NobookWebView(
         val onMessengerPath = isMessengerWebPath(currentUrl)
         if (onMessengerPath && !messengerDesktopUaApplied) {
             messengerDesktopUaApplied = true
-            state.nativeWebView.settings.userAgentString = DESKTOP_USER_AGENT
+            
+            // Custom UA Logic Integration: Get from SharedPreferences, fallback to DESKTOP_USER_AGENT
+            val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
+            val customUa = prefs.getString("custom_user_agent", "")
+            val activeUa = if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
+            
+            state.nativeWebView.settings.userAgentString = activeUa
             navigator.reload()
         } else if (!onMessengerPath && messengerDesktopUaApplied) {
             messengerDesktopUaApplied = false
@@ -2239,7 +2327,11 @@ fun NobookWebView(
     }
 
     LaunchedEffect(isDesktop) {
-        val userAgent = if (isDesktop) DESKTOP_USER_AGENT else ""
+        val userAgent = if (isDesktop) {
+            val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
+            val customUa = prefs.getString("custom_user_agent", "")
+            if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
+        } else ""
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
