@@ -75,45 +75,45 @@ import java.net.URLDecoder
 
 private const val ANTI_RELOAD_SCRIPT = """
 (function () {
-try {
-if (window.__nobookAntiReloadActive) return;
-window.__nobookAntiReloadActive = true;
+  try {
+    if (window.__nobookAntiReloadActive) return;
+    window.__nobookAntiReloadActive = true;
 
-var defineAlways = function (obj, prop, value) {
-try {
-Object.defineProperty(obj, prop, { configurable: true, get: function () { return value; } });
-} catch (e) {}
-};
+    var defineAlways = function (obj, prop, value) {
+      try {
+        Object.defineProperty(obj, prop, { configurable: true, get: function () { return value; } });
+      } catch (e) {}
+    };
 
-defineAlways(document, "visibilityState", "visible");
-defineAlways(document, "hidden", false);
-defineAlways(document, "webkitVisibilityState", "visible");
-defineAlways(document, "webkitHidden", false);
+    defineAlways(document, "visibilityState", "visible");
+    defineAlways(document, "hidden", false);
+    defineAlways(document, "webkitVisibilityState", "visible");
+    defineAlways(document, "webkitHidden", false);
 
-var blocked = ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide", "freeze"];
-var origAdd = EventTarget.prototype.addEventListener;
-var origDispatch = EventTarget.prototype.dispatchEvent;
+    var blocked = ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide", "freeze"];
+    var origAdd = EventTarget.prototype.addEventListener;
+    var origDispatch = EventTarget.prototype.dispatchEvent;
 
-EventTarget.prototype.addEventListener = function (type, listener, options) {
-if (blocked.indexOf(type) !== -1) return;
-return origAdd.call(this, type, listener, options);
-};
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (blocked.indexOf(type) !== -1) return;
+      return origAdd.call(this, type, listener, options);
+    };
 
-EventTarget.prototype.dispatchEvent = function (evt) {
-if (evt && blocked.indexOf(evt.type) !== -1) return true;
-return origDispatch.call(this, evt);
-};
+    EventTarget.prototype.dispatchEvent = function (evt) {
+      if (evt && blocked.indexOf(evt.type) !== -1) return true;
+      return origDispatch.call(this, evt);
+    };
 
-window.onblur = null;
-window.onpagehide = null;
-document.onvisibilitychange = null;
+    window.onblur = null;
+    window.onpagehide = null;
+    document.onvisibilitychange = null;
 
-Object.defineProperty(document, "hasFocus", { configurable: true, value: function () { return true; } });
+    Object.defineProperty(document, "hasFocus", { configurable: true, value: function () { return true; } });
 
-console.info("[Nobook] Anti-Reload guard active");
-} catch (err) {
-console.error("[Nobook] Anti-Reload injection failed:", err);
-}
+    console.info("[Nobook] Anti-Reload guard active");
+  } catch (err) {
+    console.error("[Nobook] Anti-Reload injection failed:", err);
+  }
 })();
 """
 
@@ -231,7 +231,9 @@ private fun resolveFinalUrl(startUrl: String, maxHops: Int = 5): String {
     return current
 }
 
-private val DEFAULT_SITE_BLOCKLIST = setOf<String>()
+private val DEFAULT_SITE_BLOCKLIST = setOf(
+    "coin-hive.com", "minergate.com", "coinhive.com"
+)
 
 private fun isBlockedSite(url: String): Boolean {
     if (DEFAULT_SITE_BLOCKLIST.isEmpty()) return false
@@ -271,10 +273,26 @@ private object VideoPlaybackBridge {
     }
 }
 
+/**
+ * Zero-Trust Media Access bridge: JS reports when the user clicks a
+ * Messenger/Facebook call button (see CALL_INTENT_DETECTOR_SCRIPT) or ends
+ * a call, so the native WebChromeClient can distinguish a genuine
+ * user-initiated call from a page script silently probing the camera/mic.
+ */
 private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit) {
     @JavascriptInterface
     fun notifyCallIntent(isCalling: Boolean) {
         Handler(Looper.getMainLooper()).post { onCallStateChanged(isCalling) }
+    }
+}
+
+/**
+ * Intent bridge for File Chooser: Allows upload only if the user genuinely clicks an upload button.
+ */
+private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> Unit) {
+    @JavascriptInterface
+    fun notifyUploadIntent() {
+        Handler(Looper.getMainLooper()).post { onUploadIntentChanged(true) }
     }
 }
 
@@ -285,7 +303,10 @@ private val TRUSTED_WEBRTC_ORIGINS = setOf(
     "https://m.facebook.com"
 )
 
-private fun createSecureWebChromeClient(getCallState: () -> Boolean): WebChromeClient {
+/**
+ * Zero-Trust Media Access (On-Demand with Hard-Kill).
+ */
+private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadState: () -> Boolean, resetUploadState: () -> Unit): WebChromeClient {
     return object : WebChromeClient() {
         override fun onPermissionRequest(request: PermissionRequest) {
             val originUrl = request.origin.toString().lowercase().trimEnd('/')
@@ -314,6 +335,21 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean): WebChromeC
 
             request.grant(resources)
         }
+
+        override fun onShowFileChooser(
+            webView: android.webkit.WebView?,
+            filePathCallback: android.webkit.ValueCallback<Array<Uri>>?,
+            fileChooserParams: FileChooserParams?
+        ): Boolean {
+            if (!getUploadState()) {
+                // Silently drop invalid/background file chooser requests
+                filePathCallback?.onReceiveValue(null)
+                return true
+            }
+            // Reset intent immediately after consumption
+            resetUploadState()
+            return false // Let multiplatform webview handle the actual file intent
+        }
     }
 }
 
@@ -324,11 +360,11 @@ private const val CALL_INTENT_DETECTOR_SCRIPT = """
 
   document.addEventListener('click', function(e) {
     var target = e.target.closest ? e.target.closest(
-      'div[aria-label*="call" i], div[aria-label*="goi" i], button[aria-label*="call" i], button[aria-label*="goi" i]'
+      'div[aria-label*="call" i], div[aria-label*="goi" i], div[aria-label*="G\\u1ecdi" i], button[aria-label*="call" i], button[aria-label*="goi" i]'
     ) : null;
     if (target) {
       var label = (target.getAttribute('aria-label') || '').toLowerCase();
-      var isEndCall = label.indexOf('end') !== -1 || label.indexOf('ket thuc') !== -1;
+      var isEndCall = label.indexOf('end') !== -1 || label.indexOf('ket thuc') !== -1 || label.indexOf('k\\u1ebft th\\u00fac') !== -1;
       if (window.CallStateBridge && window.CallStateBridge.notifyCallIntent) {
         if (isEndCall) {
           window.CallStateBridge.notifyCallIntent(false);
@@ -343,6 +379,146 @@ private const val CALL_INTENT_DETECTOR_SCRIPT = """
   }, true);
 
   console.info('[Nobook] Call-intent detector active (Zero-Trust media gate)');
+})();
+"""
+
+private const val PRIVACY_ENGINE_SCRIPT = """
+(function() {
+  if (window.__nobookPrivacyEngineActive) return;
+  window.__nobookPrivacyEngineActive = true;
+
+  // 1. Anti-Clickjacking
+  if (window.top !== window.self) {
+     try { window.top.location = window.self.location; } catch (e) {}
+  }
+
+  // 2. Anti-Phishing Guard
+  if (!window.location.hostname.includes("facebook.com") && !window.location.hostname.includes("messenger.com")) {
+     if (document.querySelector('input[type="password"]')) {
+         console.warn("[Nobook] Possible phishing detected on non-FB domain!");
+     }
+  }
+
+  // 3. FB Timer (J2TEAM Logic)
+  if (window.location.hostname.includes("facebook.com")) {
+      var timerEl = document.createElement('div');
+      timerEl.style.cssText = 'position:fixed;bottom:20px;left:20px;background:rgba(0,0,0,0.7);color:#0f0;padding:5px 10px;border-radius:10px;z-index:999999;font-family:monospace;font-size:14px;pointer-events:none;';
+      document.body.appendChild(timerEl);
+      var seconds = parseInt(localStorage.getItem('nobook_fb_timer') || '0');
+      setInterval(function() {
+         if (!document.hidden) {
+             seconds++;
+             localStorage.setItem('nobook_fb_timer', seconds);
+             var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+             timerEl.textContent = 'FB Time: ' + [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
+         }
+      }, 1000);
+  }
+
+  // 4. WebSocket Proxy (Hide Typing & Seen - J2TEAM Logic)
+  try {
+      var origWS = window.WebSocket;
+      window.WebSocket = new Proxy(origWS, {
+        construct: function(target, args) {
+          var ws = new target(...args);
+          var origSend = ws.send;
+          ws.send = function(data) {
+            try {
+               if (typeof data === 'string' && data.includes('/ls_req')) {
+                   if (data.includes('"type":4')) return; // Block typing
+                   if (data.includes('"type":3') && data.includes('"label":"21"')) return; // Block seen
+               }
+            } catch(e) {}
+            return origSend.apply(this, arguments);
+          };
+          return ws;
+        }
+      });
+  } catch(e) {}
+
+  // 5. Upload Intent Gate (For File Chooser)
+  document.addEventListener('click', function(e) {
+      var target = e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"]');
+      if (target && window.UploadStateBridge) {
+          window.UploadStateBridge.notifyUploadIntent();
+      }
+  }, true);
+
+  // 6. AI Assistant Sidebar (BYOK)
+  var aiBtn = document.createElement('button');
+  aiBtn.innerHTML = '🤖';
+  aiBtn.style.cssText = 'position:fixed;top:50%;right:0;transform:translateY(-50%);z-index:999999;background:#3578E5;color:white;border:none;border-radius:8px 0 0 8px;padding:10px;font-size:20px;cursor:pointer;box-shadow:-2px 0 5px rgba(0,0,0,0.3);';
+  document.body.appendChild(aiBtn);
+
+  var aiSidebar = document.createElement('div');
+  aiSidebar.style.cssText = 'position:fixed;top:0;right:-350px;width:350px;height:100vh;background:#fff;z-index:1000000;box-shadow:-2px 0 10px rgba(0,0,0,0.5);transition:right 0.3s ease;display:flex;flex-direction:column;font-family:sans-serif;';
+  aiSidebar.innerHTML = `
+    <div style="background:#3578E5;color:#fff;padding:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">
+        <span>Nobook AI Assistant</span>
+        <span id="nobook-ai-close" style="cursor:pointer;font-size:18px;">✖</span>
+    </div>
+    <div style="padding:10px;border-bottom:1px solid #ddd;">
+        <select id="nobook-ai-model" style="width:100%;padding:5px;margin-bottom:5px;border-radius:4px;border:1px solid #ccc;">
+            <option value="gpt">OpenAI GPT</option>
+            <option value="gemini">Google Gemini</option>
+        </select>
+        <input type="password" id="nobook-ai-key" placeholder="Enter API Key (BYOK)" style="width:100%;padding:5px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;">
+    </div>
+    <div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#f0f2f5;font-size:14px;display:flex;flex-direction:column;"></div>
+    <div style="padding:10px;border-top:1px solid #ddd;display:flex;">
+        <input type="text" id="nobook-ai-input" placeholder="Ask AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;">
+        <button id="nobook-ai-send" style="background:#3578E5;color:#fff;border:none;padding:8px 12px;margin-left:5px;border-radius:4px;cursor:pointer;">Send</button>
+    </div>
+  `;
+  document.body.appendChild(aiSidebar);
+
+  aiBtn.onclick = function() { aiSidebar.style.right = '0'; };
+  document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.right = '-350px'; };
+
+  document.getElementById('nobook-ai-send').onclick = async function() {
+      var input = document.getElementById('nobook-ai-input');
+      var chat = document.getElementById('nobook-ai-chat');
+      var key = document.getElementById('nobook-ai-key').value;
+      var model = document.getElementById('nobook-ai-model').value;
+      var text = input.value.trim();
+      if (!text || !key) { alert('Please enter both an API key and a message.'); return; }
+
+      chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#3578E5;color:#fff;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">' + text + '</span></div>';
+      input.value = '';
+      chat.scrollTop = chat.scrollHeight;
+
+      try {
+          var resDiv = document.createElement('div');
+          resDiv.style.cssText = 'margin-bottom:10px;text-align:left;';
+          resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">Thinking...</span>';
+          chat.appendChild(resDiv);
+
+          var responseText = "";
+          if (model === 'gemini') {
+              const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' + key, {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({contents:[{parts:[{text:text}]}]})
+              });
+              const json = await res.json();
+              if (json.error) throw new Error(json.error.message);
+              responseText = json.candidates[0].content.parts[0].text;
+          } else {
+              const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                  method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
+                  body: JSON.stringify({model: 'gpt-3.5-turbo', messages: [{role: 'user', content: text}]})
+              });
+              const json = await res.json();
+              if (json.error) throw new Error(json.error.message);
+              responseText = json.choices[0].message.content;
+          }
+          resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;word-break:break-word;max-width:80%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
+          chat.scrollTop = chat.scrollHeight;
+      } catch(e) {
+          resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:15px;display:inline-block;">Error: ' + e.message + '</span>';
+      }
+  };
+
+  console.info('[Nobook] Privacy Engine (J2Team + AI) active');
 })();
 """
 
@@ -486,7 +662,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       for (const p of patterns) {
         const m = html.match(p);
         if (m && m[1]) {
-          return m[1].replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+          return m[1].replace(/\\/g, '/').replace(/\\u0025/g, '%');
         }
       }
     } catch (e) { /* ignore */ }
@@ -516,7 +692,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         }
       });
 
-      if (best) return best.replace(/\\\//g, '/').replace(/\\u0025/g, '%');
+      if (best) return best.replace(/\\/g, '/').replace(/\\u0025/g, '%');
     } catch (e) { /* ignore */ }
     return null;
   };
@@ -687,7 +863,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       if (container.scrollHeight > container.clientHeight) {
         container.scrollTop = container.scrollHeight;
       }
-    } catch (e) { /* ignore: some containers are not scrollable */ }
+    } catch (e) { /* ignore */ }
 
     idleTimer = setTimeout(finish, IDLE_MS);
   };
@@ -881,7 +1057,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
 
     const btn = document.createElement("button");
     btn.id = DOWNLOAD_BTN_ID;
-    btn.setAttribute("aria-label", "Download content (giu de chon thu muc luu)");
+    btn.setAttribute("aria-label", "Download content");
 
     btn.addEventListener("click", () => {
       currentContentContainer = null;
@@ -920,7 +1096,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       const flAcDiv = button.querySelector('div.fl.ac');
       if (flAcDiv) {
         const span = flAcDiv.querySelector('span');
-        if (span && span.textContent.includes('\u{F196C}')) {
+        if (span && span.textContent.includes('\uF196C')) {
           button.style.display = 'none';
         }
       }
@@ -1123,7 +1299,7 @@ private const val LINK_CLEANER_SCRIPT = """
     var observer = new MutationObserver(function () { scan(); });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    console.info('[Nobook] Link cleaner active (ClearURLs-style tracking + affiliate + redirect-wrapper stripping)');
+    console.info('[Nobook] Link cleaner active');
   } catch (err) {
     console.error('[Nobook] Link cleaner injection failed:', err);
   }
@@ -1554,7 +1730,12 @@ private const val NETWORK_SANITIZER_SCRIPT = """
       /graph\.facebook\.com\/v\d+\/\d+\/activities/,
       /graph\.facebook\.com\/.*\/logging/,
       /facebook\.com\/ajax\/bz/,
-      /audience_network/
+      /audience_network/,
+      /storiesUpdateSeenStateMutation/,
+      /SeenMutation/,
+      /fbevents\.js/,
+      /coin-hive\.com/,
+      /minergate\.com/
     ];
 
     var sanitizeDOM = function () {
@@ -1572,7 +1753,7 @@ private const val NETWORK_SANITIZER_SCRIPT = """
     XMLHttpRequest.prototype.open = function (method, url) {
       for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
         if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-          console.info('[Nobook] Blocked tracking XHR:', url);
+          console.info('[Nobook] Blocked tracking XHR/Crypto:', url);
           arguments[1] = 'about:blank';
           break;
         }
@@ -1585,7 +1766,7 @@ private const val NETWORK_SANITIZER_SCRIPT = """
       var url = (typeof input === 'string') ? input : (input && input.url) || '';
       for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
         if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-          console.info('[Nobook] Blocked tracking fetch:', url);
+          console.info('[Nobook] Blocked tracking fetch/Crypto:', url);
           return Promise.resolve(new Response('{}', { status: 200 }));
         }
       }
@@ -1679,7 +1860,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 
     window.__nobookLazyLoadVideos = observeVideos;
 
-    console.info('[Nobook] Performance optimization (DOM culling + video IntersectionObserver, <50% pause) active');
+    console.info('[Nobook] Performance optimization active');
   } catch (err) {
     console.error('[Nobook] Performance optimization injection failed:', err);
   }
@@ -1711,7 +1892,7 @@ private const val MASTER_LOOP_SCRIPT = """
     }
 
     masterNobookLoop();
-    console.info('[Nobook] Master idle loop active (unified polling, 1.5s tick)');
+    console.info('[Nobook] Master idle loop active');
   } catch (err) {
     console.error('[Nobook] Master loop injection failed:', err);
   }
@@ -1755,8 +1936,7 @@ fun NobookWebView(
     val navigator = rememberWebViewNavigator(
         requestInterceptor = ExternalRequestInterceptor { externalUrl ->
             if (isMessengerAppDeepLink(externalUrl)) {
-                // Stay inside the WebView: do not jump to the native Messenger
-                // app or the Play Store install prompt.
+                // Prevent jumping to native app
             } else if (isBlockedSite(externalUrl)) {
                 Toast.makeText(
                     context,
@@ -1805,7 +1985,6 @@ fun NobookWebView(
         }
     }
 
-    // allow exiting while scrolling to top.
     var exitScroll by remember { mutableStateOf(false) }
     BackHandler {
         if (exitScroll) {
@@ -1861,7 +2040,6 @@ fun NobookWebView(
     }
 
     val themeColor by viewModel.themeColor
-    // Manual handling to fix visual & padding bug on settings dialog.
     var isImmersiveMode by rememberSaveable { mutableStateOf(settingsVM.immersiveMode.value) }
 
     fun setWindow(immersive: Boolean) {
@@ -1895,84 +2073,20 @@ fun NobookWebView(
                     isLoading = false
                 }
             }
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(ANTI_RELOAD_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(CALL_INTENT_DETECTOR_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(STORY_REEL_DOWNLOADER_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(MESSENGER_GUARD_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(LINK_CLEANER_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(TEXT_SELECTION_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(CONTRAST_GUARD_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(UX_EXTRAS_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(SPONSORED_VI_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(TOPIC_KEYWORD_FILTER_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(NETWORK_SANITIZER_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
-        }
-    }
-
-    LaunchedEffect(loadingState) {
-        if (loadingState is LoadingState.Finished) {
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
+            navigator.evaluateJavaScript(PRIVACY_ENGINE_SCRIPT) {}
         }
     }
 
@@ -2012,7 +2126,6 @@ fun NobookWebView(
             }
         )
     }
-
 
     var messengerDesktopUaApplied by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(state.lastLoadedUrl, isDesktop) {
@@ -2089,6 +2202,7 @@ fun NobookWebView(
     }
 
     var isUserCalling by remember { mutableStateOf(false) }
+    var isUploadIntent by remember { mutableStateOf(false) }
 
     val barsInsets = WindowInsets.systemBars.asPaddingValues()
     val imeHeight = rememberImeHeight()
@@ -2115,21 +2229,25 @@ fun NobookWebView(
 
             android.webkit.WebView.setWebContentsDebuggingEnabled(true)
 
-            webView.webChromeClient = createSecureWebChromeClient { isUserCalling }
+            webView.webChromeClient = createSecureWebChromeClient(
+                getCallState = { isUserCalling },
+                getUploadState = { isUploadIntent },
+                resetUploadState = { isUploadIntent = false }
+            )
 
             val cookieManager = CookieManager.getInstance()
             cookieManager.setAcceptCookie(true)
             cookieManager.setAcceptThirdPartyCookies(webView, true)
             cookieManager.flush()
 
-            state.webSettings.apply {
-                isJavaScriptEnabled = true
-
-                androidWebSettings.apply {
-                    //isDebugInspectorInfoEnabled = true
-                    domStorageEnabled = true
-                    hideDefaultVideoPoster = true
-                    mediaPlaybackRequiresUserGesture = false
+            runCatching {
+                state.webSettings.apply {
+                    isJavaScriptEnabled = true
+                    androidWebSettings.apply {
+                        domStorageEnabled = true
+                        hideDefaultVideoPoster = true
+                        mediaPlaybackRequiresUserGesture = false
+                    }
                 }
             }
 
@@ -2162,6 +2280,10 @@ fun NobookWebView(
                     CallStateBridge { isCalling -> isUserCalling = isCalling },
                     "CallStateBridge"
                 )
+                addJavascriptInterface(
+                    UploadStateBridge { intent -> isUploadIntent = intent },
+                    "UploadStateBridge"
+                )
 
                 setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
@@ -2189,7 +2311,10 @@ fun NobookWebView(
                         (!capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
                             !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED))
                 }.getOrDefault(true)
-                settings.loadsImagesAutomatically = !isWeakOrMetered
+                
+                runCatching {
+                    settings.loadsImagesAutomatically = !isWeakOrMetered
+                }
             }
         }
     )
