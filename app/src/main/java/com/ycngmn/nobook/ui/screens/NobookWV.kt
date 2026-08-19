@@ -392,7 +392,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   }
 
   // 2. DOM Blockers (CSS INJECTION - ZERO LAG)
-  // GIỮ NGUYÊN FORM GỐC, FONT CHỮ MẶC ĐỊNH
+  // GIỮ NGUYÊN FORM GỐC KHÔNG ÉP FONT
   var cssCore = '' +
     'div[data-testid="mw_top_banner"], ' +
     'div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], ' +
@@ -464,6 +464,12 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   var origFetch = window.fetch;
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
+    
+    // BYPASS FETCH CHO GOOGLE GEMINI VÀ OPENAI GPT ĐỂ KHÔNG BỊ CORS LỖI
+    if (url.indexOf('googleapis.com') !== -1 || url.indexOf('api.openai.com') !== -1) {
+        return origFetch.apply(window, arguments);
+    }
+
     for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
       if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
         console.info('[Nobook] Blocked Fetch:', url);
@@ -519,24 +525,25 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN TRƯỚC NGƯỠNG 1 PHÚT)
+  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN 1 PHÚT TRƯỚC NGƯỠNG)
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
-    var WARN_INTERVAL_SEC = 1800; // 30 phút
-
+    var POPUP_SHOWN_KEY = 'nobook_fb_popup_shown_cycle';
+    
     var todayStr = new Date().toDateString();
     if (localStorage.getItem(DATE_KEY) !== todayStr) {
       localStorage.setItem(DATE_KEY, todayStr);
       localStorage.setItem(STORAGE_KEY, '0');
+      localStorage.setItem(POPUP_SHOWN_KEY, '-1');
     }
 
     var spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
 
     var badge = document.createElement('div');
     badge.id = 'nobook-smart-timer-badge';
-    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.4);' +
-      'color:#fff;font-size:10px;padding:2px 5px;border-radius:4px;z-index:999999;font-family:monospace;' +
+    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.5);' +
+      'color:#fff;font-size:10px;padding:2px 4px;border-radius:4px;z-index:999999;font-family:monospace;' +
       'pointer-events:none;display:none;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);transition: opacity 0.3s;';
     document.body.appendChild(badge);
 
@@ -566,11 +573,11 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         var mins = Math.floor(spentSeconds / 60);
         var secs = spentSeconds % 60;
         
-        var nextThreshold = Math.ceil(mins / 30) * 30; 
-        if (nextThreshold === 0) nextThreshold = 30;
+        var cycle = Math.floor(mins / 30);
+        var nextThreshold = (cycle + 1) * 30; // 30, 60, 90, 120...
 
-        // Chỉ hiện badge đếm ngược ở 1 phút trước mốc (vd: 29:00 -> 29:59)
-        if (nextThreshold - mins === 1) {
+        // Hiện đếm ngược vào 2 phút trước mốc (vd: 28, 29)
+        if (nextThreshold - mins <= 2 && nextThreshold - mins > 0) {
             badge.style.display = 'block';
             var formattedSecs = secs < 10 ? '0' + secs : secs;
             badge.textContent = mins + ':' + formattedSecs;
@@ -578,9 +585,13 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
-        // Hiện Popup đúng mốc 30, 60, 90
-        if (spentSeconds > 0 && spentSeconds % WARN_INTERVAL_SEC === 0) {
-            showPopupWarning(Math.round(spentSeconds / 60));
+        // Hiện Popup đúng mốc
+        if (mins > 0 && mins % 30 === 0) {
+            var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
+            if (cycle > lastShownCycle) {
+                showPopupWarning(mins);
+                localStorage.setItem(POPUP_SHOWN_KEY, cycle.toString());
+            }
         }
       }
     }, 1000);
@@ -626,7 +637,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             '</div>';
           document.body.appendChild(aiSidebar);
           
-          setTimeout(function() { aiSidebar.style.right = '0'; }, 10); // Animation trượt ra
+          setTimeout(function() { aiSidebar.style.right = '0'; }, 10);
 
           // Cookie Extraction Logic
           document.getElementById('nobook-extract-cookie').onclick = function() {
@@ -715,10 +726,10 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   var aiTrigger = document.createElement('div');
   // Biểu tượng Robot dễ thương
   aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
-  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.4);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.3;transition:opacity 0.3s, left 0.3s, right 0.3s; border:1px solid rgba(255,255,255,0.2);';
+  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.3);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.2);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);cursor:move;z-index:999998;opacity:0.6;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.1);';
   
   aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
-  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.3'; };
+  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.6'; };
   
   var isTriggerDragging = false;
   var trigStartY, tStartTop, trigStartX, tStartLeft;
@@ -752,7 +763,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   function snapToEdge() {
       if (!isTriggerDragging) return;
       isTriggerDragging = false;
-      aiTrigger.style.transition = 'opacity 0.3s, left 0.3s, right 0.3s'; // Re-enable transition
+      aiTrigger.style.transition = 'left 0.3s ease, right 0.3s ease, top 0.3s ease, opacity 0.3s ease'; // Re-enable transition
       var rect = aiTrigger.getBoundingClientRect();
       var centerX = rect.left + (rect.width / 2);
       if (centerX < window.innerWidth / 2) {
@@ -1781,7 +1792,16 @@ private const val UX_EXTRAS_SCRIPT = """
         v.setAttribute('controls', 'controls');
         v.setAttribute('playsinline', '');
         v.controls = true;
+        // Tweak css to ensure it breaks out of unclickable containers
+        var parent = v.parentElement;
+        if (parent && window.getComputedStyle(parent).pointerEvents === 'none') {
+            v.style.pointerEvents = 'auto';
+        }
       });
+      // Bổ sung CSS cho mọi video
+      var style = document.createElement('style');
+      style.textContent = 'video { z-index: 10 !important; position: relative !important; pointer-events: auto !important; }';
+      document.head.appendChild(style);
     };
 
     var MAGNIFIER_ID = 'nobook-image-magnifier-overlay';
@@ -1924,87 +1944,6 @@ private const val TOPIC_KEYWORD_FILTER_SCRIPT = """
 })();
 """
 
-private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookPerformanceOptActive) return;
-    window.__nobookPerformanceOptActive = true;
-
-    var CULL_CSS = `
-      div[role="article"], div[data-pagelet^="FeedUnit"], [data-pagelet*="FeedUnit"] {
-        content-visibility: auto;
-        contain-intrinsic-size: auto 1000px;
-      }
-      * { scroll-behavior: auto !important; }
-    `;
-    var style = document.createElement('style');
-    style.setAttribute('data-nobook-perf', '1');
-    style.textContent = CULL_CSS;
-    document.head.appendChild(style);
-
-    var observedVideos = new WeakSet();
-
-    var handleIntersections = function (entries) {
-      entries.forEach(function (entry) {
-        var video = entry.target;
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
-          if (video.hasAttribute('data-nobook-paused')) {
-            video.removeAttribute('data-nobook-paused');
-            video.preload = 'auto';
-            if (video.dataset.nobookWasPlaying === '1') {
-              var p = video.play();
-              if (p && typeof p.catch === 'function') p.catch(function () {});
-              if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
-            }
-          }
-        } else {
-          if (!video.paused) {
-            video.dataset.nobookWasPlaying = '1';
-            video.pause();
-          } else {
-            video.dataset.nobookWasPlaying = '0';
-          }
-          video.removeAttribute('autoplay');
-          video.setAttribute('data-nobook-paused', '1');
-          video.preload = 'none';
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
-        }
-      });
-    };
-
-    var io = new IntersectionObserver(handleIntersections, {
-      root: null,
-      rootMargin: '200px 0px',
-      threshold: [0, 0.25, 0.5]
-    });
-
-    var observeVideos = function () {
-      document.querySelectorAll('video').forEach(function (v) {
-        if (observedVideos.has(v)) return;
-        observedVideos.add(v);
-        io.observe(v);
-        v.addEventListener('play', function () {
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
-        });
-        v.addEventListener('pause', function () {
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
-        });
-      });
-    };
-
-    observeVideos();
-    var mo = new MutationObserver(function () { observeVideos(); });
-    mo.observe(document.body, { childList: true, subtree: true });
-
-    window.__nobookLazyLoadVideos = observeVideos;
-
-    console.info('[Nobook] Performance optimization active');
-  } catch (err) {
-    console.error('[Nobook] Performance optimization injection failed:', err);
-  }
-})();
-"""
-
 private const val MASTER_LOOP_SCRIPT = """
 (function () {
   try {
@@ -2020,7 +1959,6 @@ private const val MASTER_LOOP_SCRIPT = """
         try {
           if (window.__nobookProcessDownloader) window.__nobookProcessDownloader();
           if (window.__nobookFixContrast) window.__nobookFixContrast();
-          if (window.__nobookLazyLoadVideos) window.__nobookLazyLoadVideos();
         } catch (e) {
           console.error('[Nobook] Master Loop Error', e);
         }
@@ -2220,7 +2158,6 @@ fun NobookWebView(
             navigator.evaluateJavaScript(UX_EXTRAS_SCRIPT) {}
             navigator.evaluateJavaScript(SPONSORED_VI_SCRIPT) {}
             navigator.evaluateJavaScript(TOPIC_KEYWORD_FILTER_SCRIPT) {}
-            navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
             navigator.evaluateJavaScript(NETWORK_SANITIZER_AND_PRIVACY_SCRIPT) {}
         }
@@ -2274,6 +2211,7 @@ fun NobookWebView(
         if (onMessengerPath && !messengerDesktopUaApplied) {
             messengerDesktopUaApplied = true
             
+            // Custom UA Logic Integration: Get from SharedPreferences, fallback to DESKTOP_USER_AGENT
             val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
             val customUa = prefs.getString("custom_user_agent", "")
             val activeUa = if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
