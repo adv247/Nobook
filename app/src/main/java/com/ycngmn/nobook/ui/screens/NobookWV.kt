@@ -54,7 +54,6 @@ import com.multiplatform.webview.web.rememberSaveableWebViewState
 import com.multiplatform.webview.web.rememberWebViewNavigator
 import com.ycngmn.nobook.R
 import com.ycngmn.nobook.ui.components.NetworkErrorDialog
-import com.ycngmn.nobook.ui.components.SplashLoading
 import com.ycngmn.nobook.ui.components.settings.SettingsDialog
 import com.ycngmn.nobook.ui.viewmodel.MainViewModel
 import com.ycngmn.nobook.ui.viewmodel.SettingsViewModel
@@ -588,7 +587,7 @@ private fun createSecureWebChromeClient(
 }
 
 // =========================================================================================
-// 3. JAVASCRIPT CORE ENGINES (ASSISTIVETOUCH, AI, ACCESSIBILITY CLEANER, FILTER, REELS PLAY)
+// 3. JAVASCRIPT CORE ENGINES (ASSISTIVETOUCH, AI, STEALTH TIMER, FILTER, REELS PLAY)
 // =========================================================================================
 
 private const val ANTI_RELOAD_SCRIPT = """
@@ -680,7 +679,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   }
 
   // 2. DOM Blockers (CSS INJECTION - ZERO LAG)
-  var css Core = '' +
+  var cssCore = '' +
     'div[data-testid="mw_top_banner"], ' +
     'div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], ' +
     'div[aria-label*="Cài đặt Messenger"], div[aria-label*="Tải ứng dụng Messenger"], ' +
@@ -695,7 +694,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     '}';
 
   var styleCore = document.createElement('style');
-  styleCore.textContent = cssCore.replace('css Core', 'cssCore');
+  styleCore.textContent = cssCore;
   document.head.appendChild(styleCore);
 
   // 3. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
@@ -810,7 +809,130 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. UPLOAD INTENT GATE
+  // 5. STEALTH TIMER & ACCURATE USERNAME EXTRACTION
+  (function initOptimizedTimer() {
+    var STORAGE_KEY = 'nobook_fb_usage_seconds';
+    var DATE_KEY = 'nobook_fb_usage_date';
+    var POPUP_SHOWN_KEY = 'nobook_fb_popup_shown_cycle';
+    
+    var todayStr = new Date().toDateString();
+    if (localStorage.getItem(DATE_KEY) !== todayStr) {
+      localStorage.setItem(DATE_KEY, todayStr);
+      localStorage.setItem(STORAGE_KEY, '0');
+      localStorage.setItem(POPUP_SHOWN_KEY, '-1');
+    }
+
+    var spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
+
+    var badge = document.createElement('div');
+    badge.id = 'nobook-smart-timer-badge';
+    // Đặt vị trí an toàn, cách lề trên và lề phải đủ xa để tránh bị che bởi màn hình cong / camera đục lỗ
+    badge.style.cssText = 'position:fixed;top:48px;right:20px;background:rgba(20,22,28,0.85);' +
+      'color:#38bdf8;font-size:11px;font-weight:bold;padding:5px 10px;border-radius:12px;z-index:999999;font-family:monospace;' +
+      'pointer-events:none;display:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
+      'border:1px solid rgba(255,255,255,0.2);box-shadow:0 4px 14px rgba(0,0,0,0.5);transition:opacity 0.3s;';
+    document.body.appendChild(badge);
+
+    function getUserName() {
+      // 1. Tìm trong ô bình luận "Bình luận dưới tên [Tên]" hoặc "Comment as [Name]"
+      var commentBoxes = document.querySelectorAll(
+        '[aria-label*="Bình luận dưới tên" i], [placeholder*="Bình luận dưới tên" i], ' +
+        '[aria-label*="Comment as" i], [placeholder*="Comment as" i], div[data-sigil*="comment"] div[aria-label]'
+      );
+      for (var i = 0; i < commentBoxes.length; i++) {
+        var txt = commentBoxes[i].getAttribute('aria-label') || commentBoxes[i].getAttribute('placeholder') || '';
+        var match = txt.match(/(?:Bình luận dưới tên|Comment as)\s+([^.,\n]+)/i);
+        if (match && match[1] && match[1].trim().length > 1) {
+          var name = match[1].trim();
+          localStorage.setItem('nobook_cached_fb_username', name);
+          return name;
+        }
+      }
+
+      // 2. Tìm trong Profile Link / Header / Menu cá nhân
+      var profileEl = document.querySelector(
+        'a[aria-label*="Trang cá nhân của" i], [aria-label*="Trang cá nhân của" i], ' +
+        'a[aria-label*="Profile of" i], [aria-label*="Profile of" i], ' +
+        'div[aria-label*="Tài khoản" i] strong, [data-sigil*="profile"] strong, ' +
+        'div[role="feed"] strong, header h1, a[href*="/me/"]'
+      );
+      if (profileEl) {
+        var label = profileEl.getAttribute('aria-label') || profileEl.innerText || profileEl.textContent || '';
+        var pMatch = label.match(/(?:Trang cá nhân của|Profile of)\s+([^.,\n]+)/i);
+        if (pMatch && pMatch[1] && pMatch[1].trim().length > 1) {
+          var name = pMatch[1].trim();
+          localStorage.setItem('nobook_cached_fb_username', name);
+          return name;
+        }
+        if (label && label.length > 1 && label.indexOf('Facebook') === -1 && label.indexOf('Menu') === -1) {
+          var clean = label.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim();
+          if (clean.length > 1 && clean.length < 35) {
+            localStorage.setItem('nobook_cached_fb_username', clean);
+            return clean;
+          }
+        }
+      }
+
+      // 3. Sử dụng tên đã lưu vào cache nếu có
+      var cached = localStorage.getItem('nobook_cached_fb_username');
+      if (cached && cached.trim().length > 1) return cached.trim();
+
+      return 'bạn';
+    }
+
+    function showPopupWarning(minutes) {
+      var uName = getUserName();
+      var modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;' +
+        'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
+      modal.innerHTML = 
+        '<div style="background:#242526;color:#fff;padding:24px;border-radius:18px;max-width:300px;width:86%;text-align:center;box-shadow:0 12px 36px rgba(0,0,0,0.7);border:1px solid rgba(255,255,255,0.1);">' +
+          '<div style="font-size:40px;margin-bottom:10px;">⏳</div>' +
+          '<div style="font-size:17px;font-weight:bold;margin-bottom:8px;line-height:1.3;">Nghỉ ngơi mắt nhé, ' + uName + '!</div>' +
+          '<div style="font-size:13px;color:#b0b3b8;margin-bottom:20px;line-height:1.4;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
+          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:11px;background:#1877f2;border:none;border-radius:10px;color:#fff;font-weight:bold;cursor:pointer;font-size:14px;box-shadow:0 4px 12px rgba(24,119,242,0.4);">Đã hiểu</button>' +
+        '</div>';
+      document.body.appendChild(modal);
+      document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
+          modal.remove(); 
+          badge.style.display = 'none'; 
+      };
+    }
+
+    setInterval(function () {
+      if (document.visibilityState === 'visible') {
+        spentSeconds += 1;
+        if (spentSeconds % 5 === 0) localStorage.setItem(STORAGE_KEY, spentSeconds.toString());
+        
+        var mins = Math.floor(spentSeconds / 60);
+        var secs = spentSeconds % 60;
+        
+        var cycle = Math.floor(mins / 30);
+        var nextThreshold = (cycle + 1) * 30;
+        var minsLeft = nextThreshold - mins;
+
+        // Stealth Timer: Chỉ xuất hiện đúng 2 phút trước mỗi mốc 30 phút rồi tự ẩn
+        if (minsLeft <= 2 && minsLeft > 0 && mins >= 1) {
+            badge.style.display = 'block';
+            var formattedSecs = secs < 10 ? '0' + secs : secs;
+            badge.textContent = '⏳ ' + mins + ':' + formattedSecs;
+        } else {
+            badge.style.display = 'none';
+        }
+
+        // Kích hoạt thông báo pop-up khi vừa chạm mốc bội số của 30 phút
+        if (mins > 0 && mins % 30 === 0) {
+            var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
+            if (cycle > lastShownCycle) {
+                showPopupWarning(mins);
+                localStorage.setItem(POPUP_SHOWN_KEY, cycle.toString());
+            }
+        }
+      }
+    }, 1000);
+  })();
+
+  // 6. UPLOAD INTENT GATE
   document.addEventListener('click', function(e) {
       var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
@@ -818,7 +940,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // 6. RECORD TOP SITES FREQUENCY
+  // 7. RECORD TOP SITES FREQUENCY
   setTimeout(function() {
     try {
       if (window.NobookFeaturesBridge && window.location.href.indexOf('facebook.com') !== -1) {
