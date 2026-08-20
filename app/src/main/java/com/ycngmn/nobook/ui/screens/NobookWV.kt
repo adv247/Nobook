@@ -307,7 +307,6 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
             val isTrusted = TRUSTED_WEBRTC_ORIGINS.any { trusted ->
                 originUrl == trusted || originUrl.startsWith("$trusted/")
             }
-            // ZERO-TRUST HARD BLOCK: Chặn cứng nếu không thuộc domain FB/Messenger
             if (!isTrusted) {
                 request.deny()
                 return
@@ -323,7 +322,6 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
                 return
             }
 
-            // ZERO-TRUST HARD BLOCK: Chặn cứng nếu người dùng không bấm nút Gọi/Nghe
             if (!getCallState()) {
                 request.deny()
                 return
@@ -392,7 +390,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   }
 
   // 2. DOM Blockers (CSS INJECTION - ZERO LAG)
-  // GIỮ NGUYÊN FORM GỐC KHÔNG ÉP FONT
   var cssCore = '' +
     'div[data-testid="mw_top_banner"], ' +
     'div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], ' +
@@ -465,8 +462,15 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     
-    // BYPASS FETCH CHO GOOGLE GEMINI VÀ OPENAI GPT ĐỂ KHÔNG BỊ CORS LỖI
-    if (url.indexOf('googleapis.com') !== -1 || url.indexOf('api.openai.com') !== -1) {
+    // BYPASS FETCH CHO GOOGLE GEMINI, OPENAI, DEEPSEEK, GROQ ĐỂ TRÁNH LỖI CORS "Failed to fetch"
+    if (url.indexOf('googleapis.com') !== -1 || 
+        url.indexOf('openai.com') !== -1 || 
+        url.indexOf('deepseek.com') !== -1 || 
+        url.indexOf('groq.com') !== -1 || 
+        url.indexOf('cerebras.ai') !== -1 || 
+        url.indexOf('openrouter.ai') !== -1 || 
+        url.indexOf('127.0.0.1') !== -1 || 
+        url.indexOf('localhost') !== -1) {
         return origFetch.apply(window, arguments);
     }
 
@@ -525,7 +529,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. SMART FB TIMER (TỐI ƯU SIÊU NHỎ, CHỈ HIỆN 1 PHÚT TRƯỚC NGƯỠNG)
+  // 5. SMART FB TIMER (TÀNG HÌNH, CHỈ HIỆN ĐẾM NGƯỢC 2 PHÚT TRƯỚC MỖI MỐC 30 PHÚT)
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
@@ -542,21 +546,21 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
     var badge = document.createElement('div');
     badge.id = 'nobook-smart-timer-badge';
-    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.5);' +
-      'color:#fff;font-size:10px;padding:2px 4px;border-radius:4px;z-index:999999;font-family:monospace;' +
-      'pointer-events:none;display:none;backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);transition: opacity 0.3s;';
+    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.6);' +
+      'color:#fff;font-size:10px;padding:2px 5px;border-radius:4px;z-index:999999;font-family:monospace;' +
+      'pointer-events:none;display:none;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);transition: opacity 0.3s;';
     document.body.appendChild(badge);
 
     function showPopupWarning(minutes) {
       var modal = document.createElement('div');
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:9999999;' +
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;' +
         'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
       modal.innerHTML = 
-        '<div style="background:#242526;color:#fff;padding:20px;border-radius:12px;max-width:280px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.5);">' +
-          '<div style="font-size:32px;margin-bottom:8px;">⏳</div>' +
+        '<div style="background:#242526;color:#fff;padding:20px;border-radius:14px;max-width:280px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.6);">' +
+          '<div style="font-size:36px;margin-bottom:8px;">⏳</div>' +
           '<div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi chút nhé!</div>' +
           '<div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
-          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;">Đã hiểu</button>' +
+          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;font-size:14px;">Đã hiểu</button>' +
         '</div>';
       document.body.appendChild(modal);
       document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
@@ -574,9 +578,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         var secs = spentSeconds % 60;
         
         var cycle = Math.floor(mins / 30);
-        var nextThreshold = (cycle + 1) * 30; // 30, 60, 90, 120...
+        var nextThreshold = (cycle + 1) * 30; // 30, 60, 90, 120, 150...
 
-        // Hiện đếm ngược vào 2 phút trước mốc (vd: 28, 29)
+        // Hiện badge 10px đếm ngược đúng 2 phút trước mỗi mốc (28m->30m, 58m->60m, 88m->90m...)
         if (nextThreshold - mins <= 2 && nextThreshold - mins > 0) {
             badge.style.display = 'block';
             var formattedSecs = secs < 10 ? '0' + secs : secs;
@@ -585,7 +589,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
-        // Hiện Popup đúng mốc
+        // Bật popup đúng mốc chẵn
         if (mins > 0 && mins % 30 === 0) {
             var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
             if (cycle > lastShownCycle) {
@@ -605,59 +609,59 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // 7. DRAGGABLE AI ASSISTANT (ORIGINAL FORM + FULL I/O COOKIE)
+  // 7. DRAGGABLE AI ASSISTANT (BYOK + SUMMARIZERRRR CORE + SNAP TO EDGE)
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
           aiSidebar = document.createElement('div');
           aiSidebar.id = 'nobook-ai-sidebar';
-          // Giữ nguyên form thiết kế gốc của Sidebar
-          aiSidebar.style.cssText = 'position:fixed;top:0;right:-350px;width:350px;height:100vh;background:#fff;z-index:1000000;box-shadow:-2px 0 10px rgba(0,0,0,0.5);transition:right 0.3s ease;display:flex;flex-direction:column;font-family:sans-serif;';
+          aiSidebar.style.cssText = 'position:fixed;top:0;right:-350px;width:350px;height:100vh;background:#fff;z-index:1000000;box-shadow:-2px 0 12px rgba(0,0,0,0.3);transition:right 0.3s ease;display:flex;flex-direction:column;font-family:sans-serif;';
           
           aiSidebar.innerHTML = 
-            '<div style="background:#3578E5;color:#fff;padding:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">' +
-                '<span>Nobook AI & Tools</span>' +
+            '<div style="background:#1877f2;color:#fff;padding:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">' +
+                '<span>🤖 Nobook AI & Tools</span>' +
                 '<span id="nobook-ai-close" style="cursor:pointer;font-size:18px;">✖</span>' +
             '</div>' +
-            '<div style="padding:10px;border-bottom:1px solid #ddd;">' +
-                '<select id="nobook-ai-model" style="width:100%;padding:5px;margin-bottom:5px;border-radius:4px;border:1px solid #ccc;">' +
-                    '<option value="gpt">OpenAI GPT</option>' +
-                    '<option value="gemini">Google Gemini</option>' +
+            '<div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">' +
+                '<select id="nobook-ai-model" style="width:100%;padding:6px;margin-bottom:6px;border-radius:6px;border:1px solid #ccc;font-size:13px;">' +
+                    '<option value="gemini">Google Gemini (Khuyên dùng)</option>' +
+                    '<option value="gpt">OpenAI (ChatGPT)</option>' +
+                    '<option value="deepseek">DeepSeek AI</option>' +
                 '</select>' +
-                '<input type="password" id="nobook-ai-key" placeholder="Enter API Key (BYOK)" style="width:100%;padding:5px;box-sizing:border-box;border-radius:4px;border:1px solid #ccc;margin-bottom:8px;">' +
-                '<div style="display:flex; gap:5px;">' +
-                  '<button id="nobook-extract-cookie" style="flex:1;padding:6px;background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">Xuất Cookie</button>' +
-                  '<button id="nobook-import-cookie" style="flex:1;padding:6px;background:#FF9800;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;">Nhập Cookie</button>' +
+                '<input type="password" id="nobook-ai-key" placeholder="Nhập API Key cá nhân (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:6px;border:1px solid #ccc;font-size:13px;margin-bottom:8px;">' +
+                '<div style="display:flex; gap:6px; margin-bottom:6px;">' +
+                  '<button id="nobook-extract-cookie" style="flex:1;padding:6px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">Xuất Cookie</button>' +
+                  '<button id="nobook-import-cookie" style="flex:1;padding:6px;background:#FF9800;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">Nhập Cookie</button>' +
+                '</div>' +
+                '<div style="display:flex; gap:6px;">' +
+                  '<button id="nobook-summarize-page" style="flex:1;padding:6px;background:#673AB7;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">⚡ Tóm tắt Trang</button>' +
+                  '<button id="nobook-get-uid" style="flex:1;padding:6px;background:#009688;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">🔍 Lấy UID Page</button>' +
                 '</div>' +
             '</div>' +
-            '<div id="nobook-ai-chat" style="flex:1;padding:10px;overflow-y:auto;background:#f0f2f5;font-size:14px;display:flex;flex-direction:column;"></div>' +
-            '<div style="padding:10px;border-top:1px solid #ddd;display:flex;">' +
-                '<input type="text" id="nobook-ai-input" placeholder="Ask AI..." style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;">' +
-                '<button id="nobook-ai-send" style="background:#3578E5;color:#fff;border:none;padding:8px 12px;margin-left:5px;border-radius:4px;cursor:pointer;">Send</button>' +
+            '<div id="nobook-ai-chat" style="flex:1;padding:12px;overflow-y:auto;background:#f0f2f5;font-size:13px;display:flex;flex-direction:column;line-height:1.4;"></div>' +
+            '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#fff;">' +
+                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI hoặc phân tích link..." style="flex:1;padding:8px 12px;border:1px solid #ccc;border-radius:20px;outline:none;font-size:13px;">' +
+                '<button id="nobook-ai-send" style="background:#1877f2;color:#fff;border:none;padding:8px 14px;margin-left:6px;border-radius:20px;cursor:pointer;font-weight:bold;">Gửi</button>' +
             '</div>';
           document.body.appendChild(aiSidebar);
           
           setTimeout(function() { aiSidebar.style.right = '0'; }, 10);
 
-          // Cookie Extraction Logic
+          // Trích xuất Cookie
           document.getElementById('nobook-extract-cookie').onclick = function() {
               var cookies = document.cookie;
               var formatted = "FB Cookies:\n" + cookies.split(';').map(c => c.trim()).join('\n');
               if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
                   window.ClipboardBridge.copyText(formatted);
                   alert("Đã sao chép Cookie FB vào bộ nhớ đệm!");
-              } else if (navigator.clipboard) {
-                  navigator.clipboard.writeText(formatted).then(function() {
-                      alert("Đã sao chép Cookie FB vào Clipboard hệ thống!");
-                  }).catch(function(err) {
-                      prompt("Copy thủ công:", formatted);
-                  });
+              } else {
+                  prompt("Copy thủ công:", formatted);
               }
           };
 
-          // Cookie Import Logic
+          // Nhập Cookie
           document.getElementById('nobook-import-cookie').onclick = function() {
-              var input = prompt("Dán nội dung Trích xuất FB Cookies vào đây:");
+              var input = prompt("Dán FB Cookies vào đây:");
               if (input) {
                   var cookiesArray = input.replace('FB Cookies:\n', '').split(';');
                   cookiesArray.forEach(function(c) {
@@ -671,9 +675,32 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               }
           };
 
-          // Chat logic
+          // Tóm tắt thông minh trang hiện tại (Summarizerrrr Core)
+          document.getElementById('nobook-summarize-page').onclick = function() {
+              var content = "";
+              var articles = document.querySelectorAll('div[role="article"]');
+              if (articles.length > 0) {
+                  articles.forEach(function(a, idx) {
+                      if (idx < 3) content += (a.innerText || "") + "\n---\n";
+                  });
+              } else {
+                  content = document.body.innerText.slice(0, 3000);
+              }
+              document.getElementById('nobook-ai-input').value = "Tóm tắt ngắn gọn nội dung sau:\n" + content;
+              document.getElementById('nobook-ai-send').click();
+          };
+
+          // Lấy UID Profile / Page
+          document.getElementById('nobook-get-uid').onclick = function() {
+              var uidMatch = document.cookie.match(/c_user=([0-9]+)/);
+              var uid = uidMatch ? uidMatch[1] : "Không tìm thấy";
+              alert("UID tài khoản hiện tại: " + uid + "\nURL hiện tại: " + window.location.href);
+          };
+
+          // Đóng Sidebar
           document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.right = '-350px'; };
 
+          // Gửi câu hỏi đến AI
           document.getElementById('nobook-ai-send').onclick = async function() {
               var input = document.getElementById('nobook-ai-input');
               var chat = document.getElementById('nobook-ai-chat');
@@ -682,38 +709,50 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               var text = input.value.trim();
               if (!text || !key) { alert('Vui lòng nhập API Key và nội dung.'); return; }
 
-              chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#3578E5;color:#fff;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">' + text + '</span></div>';
+              chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#1877f2;color:#fff;padding:8px 12px;border-radius:16px 16px 2px 16px;display:inline-block;max-width:85%;">' + text.replace(/\n/g, '<br>') + '</span></div>';
               input.value = '';
               chat.scrollTop = chat.scrollHeight;
 
               var resDiv = document.createElement('div');
               resDiv.style.cssText = 'margin-bottom:10px;text-align:left;';
-              resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;max-width:80%;">Thinking...</span>';
+              resDiv.innerHTML = '<span style="background:#fff;color:#000;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;max-width:85%;box-shadow:0 1px 3px rgba(0,0,0,0.1);">Đang xử lý...</span>';
               chat.appendChild(resDiv);
               chat.scrollTop = chat.scrollHeight;
 
               try {
                   var responseText = "";
                   if (model === 'gemini') {
-                      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=' + key, {
-                          method: 'POST', headers: {'Content-Type': 'application/json'},
-                          body: JSON.stringify({contents:[{parts:[{text:text}]}]})
+                      // Fix triệt để gọi API Gemini
+                      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ contents: [{ parts: [{ text: text }] }] })
                       });
                       const json = await res.json();
                       if (json.error) throw new Error(json.error.message);
                       responseText = json.candidates[0].content.parts[0].text;
+                  } else if (model === 'deepseek') {
+                      const res = await fetch('https://api.deepseek.com/chat/completions', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+                          body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: text }] })
+                      });
+                      const json = await res.json();
+                      if (json.error) throw new Error(json.error.message);
+                      responseText = json.choices[0].message.content;
                   } else {
                       const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                          method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
-                          body: JSON.stringify({model: 'gpt-3.5-turbo', messages: [{role: 'user', content: text}]})
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+                          body: JSON.stringify({ model: 'gpt-3.5-turbo', messages: [{ role: 'user', content: text }] })
                       });
                       const json = await res.json();
                       if (json.error) throw new Error(json.error.message);
                       responseText = json.choices[0].message.content;
                   }
-                  resDiv.innerHTML = '<span style="background:#e4e6eb;color:#000;padding:8px 12px;border-radius:15px;display:inline-block;word-break:break-word;max-width:80%;">' + responseText.replace(/\n/g, '<br>') + '</span>';
+                  resDiv.innerHTML = '<span style="background:#fff;color:#000;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;word-break:break-word;max-width:85%;box-shadow:0 1px 3px rgba(0,0,0,0.1);">' + responseText.replace(/\n/g, '<br>') + '</span>';
               } catch(e) {
-                  resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:15px;display:inline-block;">Error: ' + e.message + '</span>';
+                  resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;">Lỗi: ' + e.message + '</span>';
               }
               chat.scrollTop = chat.scrollHeight;
           };
@@ -722,21 +761,20 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (Mờ, Tròn, Draggable & Snap to Edge)
+  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (MỜ ẢO, SNAP TO EDGE)
   var aiTrigger = document.createElement('div');
-  // Biểu tượng Robot dễ thương
   aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
-  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.3);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 10px rgba(0,0,0,0.2);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);cursor:move;z-index:999998;opacity:0.6;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.1);';
+  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.4);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.4;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.2);';
   
   aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
-  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.6'; };
+  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.4'; };
   
   var isTriggerDragging = false;
   var trigStartY, tStartTop, trigStartX, tStartLeft;
   
   aiTrigger.onmousedown = function(e) {
       isTriggerDragging = true;
-      aiTrigger.style.transition = 'none'; // Disable transition during drag
+      aiTrigger.style.transition = 'none';
       trigStartY = e.clientY; trigStartX = e.clientX;
       tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
       e.preventDefault();
@@ -763,7 +801,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   function snapToEdge() {
       if (!isTriggerDragging) return;
       isTriggerDragging = false;
-      aiTrigger.style.transition = 'left 0.3s ease, right 0.3s ease, top 0.3s ease, opacity 0.3s ease'; // Re-enable transition
+      aiTrigger.style.transition = 'left 0.3s ease, top 0.3s ease, opacity 0.3s ease';
       var rect = aiTrigger.getBoundingClientRect();
       var centerX = rect.left + (rect.width / 2);
       if (centerX < window.innerWidth / 2) {
@@ -1435,7 +1473,6 @@ private const val MESSENGER_GUARD_SCRIPT = """
       var el = e.target;
       var link = el && el.closest ? el.closest("a[href]") : null;
       
-      // BẮT SỰ KIỆN CLICK VÀO ICON MESSENGER ĐỂ BYPASS TẢI APP TRÊN WEB MOBILE
       var isMsgIcon = el && el.closest ? el.closest('a[href*="/messages/"], a[aria-label="Messenger"], svg[aria-label="Messenger"], div[data-sigil="messages"]') : null;
       if (isMsgIcon) {
         e.preventDefault();
@@ -1792,16 +1829,10 @@ private const val UX_EXTRAS_SCRIPT = """
         v.setAttribute('controls', 'controls');
         v.setAttribute('playsinline', '');
         v.controls = true;
-        // Tweak css to ensure it breaks out of unclickable containers
-        var parent = v.parentElement;
-        if (parent && window.getComputedStyle(parent).pointerEvents === 'none') {
-            v.style.pointerEvents = 'auto';
-        }
+        v.style.pointerEvents = 'auto';
+        v.style.zIndex = '10';
+        v.style.position = 'relative';
       });
-      // Bổ sung CSS cho mọi video
-      var style = document.createElement('style');
-      style.textContent = 'video { z-index: 10 !important; position: relative !important; pointer-events: auto !important; }';
-      document.head.appendChild(style);
     };
 
     var MAGNIFIER_ID = 'nobook-image-magnifier-overlay';
@@ -1944,6 +1975,75 @@ private const val TOPIC_KEYWORD_FILTER_SCRIPT = """
 })();
 """
 
+private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookPerformanceOptActive) return;
+    window.__nobookPerformanceOptActive = true;
+
+    var observedVideos = new WeakSet();
+
+    var handleIntersections = function (entries) {
+      entries.forEach(function (entry) {
+        var video = entry.target;
+        if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+          if (video.hasAttribute('data-nobook-paused')) {
+            video.removeAttribute('data-nobook-paused');
+            video.preload = 'auto';
+            if (video.dataset.nobookWasPlaying === '1') {
+              var p = video.play();
+              if (p && typeof p.catch === 'function') p.catch(function () {});
+              if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
+            }
+          }
+        } else {
+          if (!video.paused) {
+            video.dataset.nobookWasPlaying = '1';
+            video.pause();
+          } else {
+            video.dataset.nobookWasPlaying = '0';
+          }
+          video.removeAttribute('autoplay');
+          video.setAttribute('data-nobook-paused', '1');
+          video.preload = 'none';
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
+        }
+      });
+    };
+
+    var io = new IntersectionObserver(handleIntersections, {
+      root: null,
+      rootMargin: '200px 0px',
+      threshold: [0, 0.25, 0.5]
+    });
+
+    var observeVideos = function () {
+      document.querySelectorAll('video').forEach(function (v) {
+        if (observedVideos.has(v)) return;
+        observedVideos.add(v);
+        io.observe(v);
+        v.addEventListener('play', function () {
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
+        });
+        v.addEventListener('pause', function () {
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
+        });
+      });
+    };
+
+    observeVideos();
+    var mo = new MutationObserver(function () { observeVideos(); });
+    mo.observe(document.body, { childList: true, subtree: true });
+
+    window.__nobookLazyLoadVideos = observeVideos;
+
+    console.info('[Nobook] Performance optimization active');
+  } catch (err) {
+    console.error('[Nobook] Performance optimization injection failed:', err);
+  }
+})();
+"""
+
 private const val MASTER_LOOP_SCRIPT = """
 (function () {
   try {
@@ -1959,6 +2059,7 @@ private const val MASTER_LOOP_SCRIPT = """
         try {
           if (window.__nobookProcessDownloader) window.__nobookProcessDownloader();
           if (window.__nobookFixContrast) window.__nobookFixContrast();
+          if (window.__nobookLazyLoadVideos) window.__nobookLazyLoadVideos();
         } catch (e) {
           console.error('[Nobook] Master Loop Error', e);
         }
@@ -2158,6 +2259,7 @@ fun NobookWebView(
             navigator.evaluateJavaScript(UX_EXTRAS_SCRIPT) {}
             navigator.evaluateJavaScript(SPONSORED_VI_SCRIPT) {}
             navigator.evaluateJavaScript(TOPIC_KEYWORD_FILTER_SCRIPT) {}
+            navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
             navigator.evaluateJavaScript(NETWORK_SANITIZER_AND_PRIVACY_SCRIPT) {}
         }
@@ -2211,7 +2313,6 @@ fun NobookWebView(
         if (onMessengerPath && !messengerDesktopUaApplied) {
             messengerDesktopUaApplied = true
             
-            // Custom UA Logic Integration: Get from SharedPreferences, fallback to DESKTOP_USER_AGENT
             val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
             val customUa = prefs.getString("custom_user_agent", "")
             val activeUa = if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
