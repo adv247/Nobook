@@ -81,6 +81,7 @@ import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
+import java.util.concurrent.atomic.AtomicInteger
 
 // =========================================================================================
 // 1. URL SANITIZATION & REDIRECT RESOLVER (AFFILIATE, TRACKING, YOUTUBE & SHORTLINKS)
@@ -226,6 +227,15 @@ private fun isMessengerWebPath(url: String): Boolean {
         lower.contains("/direct/inbox")
 }
 
+private fun isFacebookInternalUrl(url: String): Boolean {
+    val lower = url.lowercase()
+    return lower.contains("facebook.com") ||
+        lower.contains("fb.com") ||
+        lower.contains("fb.watch") ||
+        lower.contains("fb.me") ||
+        lower.contains("messenger.com")
+}
+
 // =========================================================================================
 // 2. THREAD-SAFE NATIVE BRIDGES (AI NATIVE PROXY, BOOKMARKS, FILTERS, TOP SITES, VIDEO)
 // =========================================================================================
@@ -284,219 +294,297 @@ private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> 
 
 /**
  * NATIVE AI PROXY BRIDGE
- * Bypasses browser CORS, CSP, VPN proxy packet inspection and sec-gpc/dnt header constraints.
- * Supports Gemini 2.0 Flash, Gemini 1.5 Flash, Gemini 1.5 Pro, OpenAI, DeepSeek, Grok, Copilot.
+ * Hỗ trợ xoay tua key tự động Snip {API1|API2|API3}, tự fallback model khi lỗi Quota/Deprecated.
+ * Vượt qua toàn bộ CORS, CSP, VPN proxy packet inspection trên Android IO Thread.
  */
 private class NativeAiProxyBridge(
     private val context: Context,
     private val evaluateJsOnWebView: (String) -> Unit
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val keyIndexCounter = AtomicInteger(0)
+
+    private fun parseApiKeys(rawKeyInput: String): List<String> {
+        val cleaned = rawKeyInput.trim()
+        if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
+            val inner = cleaned.substring(1, cleaned.length - 1)
+            return inner.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+        }
+        if (cleaned.contains("|")) {
+            return cleaned.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+        }
+        return if (cleaned.isNotEmpty()) listOf(cleaned) else emptyList()
+    }
 
     @JavascriptInterface
-    fun executeAiRequest(requestId: String, model: String, apiKey: String, promptJson: String) {
+    fun executeAiRequest(requestId: String, model: String, rawApiKey: String, promptJson: String) {
         CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val responseText = when {
-                    model.startsWith("gemini") -> callGeminiNative(model, apiKey, promptJson)
-                    model.startsWith("deepseek") -> callDeepSeekNative(apiKey, promptJson)
-                    model.startsWith("grok") -> callGrokNative(apiKey, promptJson)
-                    else -> callOpenAiNative(model, apiKey, promptJson)
-                }
-                
+            val keyList = parseApiKeys(rawApiKey)
+            if (keyList.isEmpty()) {
                 withContext(Dispatchers.Main) {
-                    val escaped = JSONObject.quote(responseText)
-                    val jsCallback = "window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', true, $escaped);"
-                    evaluateJsOnWebView(jsCallback)
+                    val errMsg = JSONObject.quote("Vui lòng cung cấp ít nhất một API Key hợp lệ.")
+                    evaluateJsOnWebView("window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', false, $errMsg);")
                 }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    val errMsg = JSONObject.quote(e.message ?: "Lỗi kết nối AI qua Native IO Thread")
-                    val jsCallback = "window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', false, $errMsg);"
-                    evaluateJsOnWebView(jsCallback)
+                return@launch
+            }
+
+            var lastError = "Không thể kết nối dịch vụ AI"
+            var success = false
+            var finalResponse = ""
+
+            val startIndex = Math.abs(keyIndexCounter.getAndIncrement()) % keyList.size
+            val orderedKeys = mutableListOf<String>()
+            for (i in keyList.indices) {
+                orderedKeys.add(keyList[(startIndex + i) % keyList.size])
+            }
+
+            for (apiKey in orderedKeys) {
+                try {
+                    finalResponse = when {
+                        model.startsWith("gemini") -> executeGeminiWithFallback(model, apiKey, promptJson)
+                        model.startsWith("deepseek") -> callDeepSeekNative(apiKey, promptJson)
+                        model.startsWith("grok") -> callGrokNative(apiKey, promptJson)
+                        else -> callOpenAiNative(model, apiKey, promptJson)
+                    }
+                    success = true
+                    break
+                } catch (e: Exception) {
+                    lastError = e.message ?: "Lỗi không xác định qua luồng IO"
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                if (success) {
+                    val escaped = JSONObject.quote(finalResponse)
+                    evaluateJsOnWebView("window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', true, $escaped);")
+                } else {
+                    val errMsg = JSONObject.quote(lastError)
+                    evaluateJsOnWebView("window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', false, $errMsg);")
                 }
             }
         }
     }
 
-    private fun callGeminiNative(modelName: String, key: String, prompt: String): String {
-        val selectedModel = when (modelName) {
-            "gemini-2.0-flash" -> "gemini-2.0-flash"
-            "gemini-1.5-pro" -> "gemini-1.5-pro"
-            else -> "gemini-1.5-flash"
-        }
-        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=$key"
-        val url = URL(endpoint)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 25000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-        }
+    private fun executeGeminiWithFallback(initialModel: String, key: String, prompt: String): String {
+        val modelCandidates = mutableListOf<String>()
+        modelCandidates.add(initialModel)
+        
+        // Thêm các model fallback phổ biến mới nhất
+        val fallbacks = listOf("gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro")
+        fallbacks.forEach { if (!modelCandidates.contains(it)) modelCandidates.add(it) }
 
-        val requestPayload = JSONObject().apply {
-            val contentsArr = JSONArray().apply {
-                val partsObj = JSONObject().apply {
-                    val partsArr = JSONArray().apply {
-                        put(JSONObject().put("text", prompt))
-                    }
-                    put("parts", partsArr)
+        var lastEx: Exception? = null
+        for (m in modelCandidates) {
+            try {
+                return callGeminiNative(m, key, prompt)
+            } catch (e: Exception) {
+                lastEx = e
+                val msg = e.message ?: ""
+                // Nếu model bị 404 hoặc deprecated thì thử model tiếp theo
+                if (msg.contains("not found", true) || msg.contains("no longer available", true) || msg.contains("deprecated", true)) {
+                    continue
+                } else {
+                    throw e
                 }
-                put(partsObj)
-            }
-            put("contents", contentsArr)
-        }
-
-        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
-
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
-        conn.disconnect()
-
-        val json = JSONObject(responseStr)
-        if (json.has("error")) {
-            throw Exception(json.getJSONObject("error").optString("message", "Gemini API Error"))
-        }
-
-        val candidates = json.optJSONArray("candidates")
-        if (candidates != null && candidates.length() > 0) {
-            val content = candidates.getJSONObject(0).optJSONObject("content")
-            val parts = content?.optJSONArray("parts")
-            if (parts != null && parts.length() > 0) {
-                return parts.getJSONObject(0).optString("text", "")
             }
         }
-        return "Không nhận được nội dung trả về từ Gemini."
+        throw lastEx ?: Exception("Không thể thực thi yêu cầu qua Gemini API.")
+    }
+
+    private fun callGeminiNative(modelName: String, key: String, prompt: String): String {
+        val resolvedModel = when (modelName) {
+            "gemini-2.0-flash" -> "gemini-2.5-flash"
+            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash" -> modelName
+            else -> modelName.ifBlank { "gemini-2.5-flash" }
+        }
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=$key"
+        val url = URL(endpoint)
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 25000
+                readTimeout = 25000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            }
+
+            val requestPayload = JSONObject().apply {
+                val contentsArr = JSONArray().apply {
+                    val partsObj = JSONObject().apply {
+                        val partsArr = JSONArray().apply {
+                            put(JSONObject().put("text", prompt))
+                        }
+                        put("parts", partsArr)
+                    }
+                    put(partsObj)
+                }
+                put("contents", contentsArr)
+            }
+
+            OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+
+            val json = JSONObject(responseStr)
+            if (json.has("error")) {
+                throw Exception(json.getJSONObject("error").optString("message", "Gemini API Error"))
+            }
+
+            val candidates = json.optJSONArray("candidates")
+            if (candidates != null && candidates.length() > 0) {
+                val content = candidates.getJSONObject(0).optJSONObject("content")
+                val parts = content?.optJSONArray("parts")
+                if (parts != null && parts.length() > 0) {
+                    return parts.getJSONObject(0).optString("text", "")
+                }
+            }
+            return "Không nhận được nội dung trả về từ Gemini."
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     private fun callOpenAiNative(modelName: String, key: String, prompt: String): String {
         val endpoint = "https://api.openai.com/v1/chat/completions"
         val url = URL(endpoint)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 25000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("Authorization", "Bearer $key")
-        }
-
-        val openAiModel = if (modelName == "gpt-4o") "gpt-4o" else "gpt-3.5-turbo"
-
-        val requestPayload = JSONObject().apply {
-            put("model", openAiModel)
-            val messagesArr = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", prompt)
-                })
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 25000
+                readTimeout = 25000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Authorization", "Bearer $key")
             }
-            put("messages", messagesArr)
+
+            val openAiModel = if (modelName.contains("gpt-4")) "gpt-4o" else "gpt-3.5-turbo"
+
+            val requestPayload = JSONObject().apply {
+                put("model", openAiModel)
+                val messagesArr = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", prompt)
+                    })
+                }
+                put("messages", messagesArr)
+            }
+
+            OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+
+            val json = JSONObject(responseStr)
+            if (json.has("error")) {
+                throw Exception(json.getJSONObject("error").optString("message", "OpenAI Error"))
+            }
+
+            val choices = json.optJSONArray("choices")
+            if (choices != null && choices.length() > 0) {
+                return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+            }
+            return "Không có phản hồi từ OpenAI."
+        } finally {
+            conn?.disconnect()
         }
-
-        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
-
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
-        conn.disconnect()
-
-        val json = JSONObject(responseStr)
-        if (json.has("error")) {
-            throw Exception(json.getJSONObject("error").optString("message", "OpenAI Error"))
-        }
-
-        val choices = json.optJSONArray("choices")
-        if (choices != null && choices.length() > 0) {
-            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
-        }
-        return "Không có phản hồi từ OpenAI."
     }
 
     private fun callDeepSeekNative(key: String, prompt: String): String {
         val endpoint = "https://api.deepseek.com/chat/completions"
         val url = URL(endpoint)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 25000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("Authorization", "Bearer $key")
-        }
-
-        val requestPayload = JSONObject().apply {
-            put("model", "deepseek-chat")
-            val messagesArr = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", prompt)
-                })
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 25000
+                readTimeout = 25000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Authorization", "Bearer $key")
             }
-            put("messages", messagesArr)
+
+            val requestPayload = JSONObject().apply {
+                put("model", "deepseek-chat")
+                val messagesArr = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", prompt)
+                    })
+                }
+                put("messages", messagesArr)
+            }
+
+            OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+
+            val json = JSONObject(responseStr)
+            if (json.has("error")) {
+                throw Exception(json.getJSONObject("error").optString("message", "DeepSeek Error"))
+            }
+
+            val choices = json.optJSONArray("choices")
+            if (choices != null && choices.length() > 0) {
+                return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+            }
+            return "Không có dữ liệu từ DeepSeek."
+        } finally {
+            conn?.disconnect()
         }
-
-        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
-
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
-        conn.disconnect()
-
-        val json = JSONObject(responseStr)
-        if (json.has("error")) {
-            throw Exception(json.getJSONObject("error").optString("message", "DeepSeek Error"))
-        }
-
-        val choices = json.optJSONArray("choices")
-        if (choices != null && choices.length() > 0) {
-            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
-        }
-        return "Không có dữ liệu từ DeepSeek."
     }
 
     private fun callGrokNative(key: String, prompt: String): String {
         val endpoint = "https://api.x.ai/v1/chat/completions"
         val url = URL(endpoint)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 25000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("Authorization", "Bearer $key")
-        }
-
-        val requestPayload = JSONObject().apply {
-            put("model", "grok-beta")
-            val messagesArr = JSONArray().apply {
-                put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", prompt)
-                })
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 25000
+                readTimeout = 25000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Authorization", "Bearer $key")
             }
-            put("messages", messagesArr)
+
+            val requestPayload = JSONObject().apply {
+                put("model", "grok-beta")
+                val messagesArr = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", prompt)
+                    })
+                }
+                put("messages", messagesArr)
+            }
+
+            OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+
+            val json = JSONObject(responseStr)
+            if (json.has("error")) {
+                throw Exception(json.getJSONObject("error").optString("message", "Grok Error"))
+            }
+
+            val choices = json.optJSONArray("choices")
+            if (choices != null && choices.length() > 0) {
+                return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+            }
+            return "Không có dữ liệu từ Grok."
+        } finally {
+            conn?.disconnect()
         }
-
-        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
-
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
-        conn.disconnect()
-
-        val json = JSONObject(responseStr)
-        if (json.has("error")) {
-            throw Exception(json.getJSONObject("error").optString("message", "Grok Error"))
-        }
-
-        val choices = json.optJSONArray("choices")
-        if (choices != null && choices.length() > 0) {
-            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
-        }
-        return "Không có dữ liệu từ Grok."
     }
 }
 
@@ -730,17 +818,10 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   if (window.__nobookPrivacyEngineActive) return;
   window.__nobookPrivacyEngineActive = true;
 
-  // 1. Anti-Clickjacking & Phishing
   if (window.top !== window.self) {
      try { window.top.location = window.self.location; } catch (e) {}
   }
-  if (!window.location.hostname.includes("facebook.com") && !window.location.hostname.includes("messenger.com")) {
-     if (document.querySelector('input[type="password"]')) {
-         console.warn("[Nobook] Possible phishing detected on non-FB domain!");
-     }
-  }
 
-  // 2. DOM Blockers (CSS INJECTION - ZERO LAG)
   var cssCore = '' +
     'div[data-testid="mw_top_banner"], ' +
     'div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], ' +
@@ -759,7 +840,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   styleCore.textContent = cssCore;
   document.head.appendChild(styleCore);
 
-  // 3. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
   var BLOCKED_NETWORK_PATTERNS = [
     /an\.facebook\.com/,
     /pixel\.facebook\.com/,
@@ -781,7 +861,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     this.__nobookUrl = url;
     for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
       if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-        console.info('[Nobook] Blocked XHR:', url);
         arguments[1] = 'about:blank';
         break;
       }
@@ -790,22 +869,20 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   };
 
   XMLHttpRequest.prototype.send = function (body) {
-    try {
+    var url = this.__nobookUrl || '';
+    var isAiDomain = url.indexOf('googleapis.com') !== -1 || 
+                     url.indexOf('openai.com') !== -1 || 
+                     url.indexOf('deepseek.com') !== -1 || 
+                     url.indexOf('x.ai') !== -1;
+    
+    if (!isAiDomain) {
+      try {
         if (typeof this.setRequestHeader === 'function') {
             this.setRequestHeader('sec-gpc', '1');
             this.setRequestHeader('dnt', '1');
         }
-    } catch(e) {}
-    
-    this.addEventListener('load', function() {
-        if (this.__nobookUrl && this.__nobookUrl.indexOf('graphql') !== -1) {
-            try {
-                if (this.responseText && this.responseText.indexOf('HIDE_COUNTS') !== -1) {
-                    console.info('[Nobook] HIDE_COUNTS detected.');
-                }
-            } catch(e) {}
-        }
-    });
+      } catch(e) {}
+    }
     return origXhrSend.apply(this, arguments);
   };
 
@@ -813,7 +890,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     
-    // BYPASS FETCH TOÀN DIỆN CHO MỌI DOMAIN AI (KHÔNG CHÈN HEADER GÂY LỖI CORS)
     if (url.indexOf('googleapis.com') !== -1 || 
         url.indexOf('openai.com') !== -1 || 
         url.indexOf('deepseek.com') !== -1 || 
@@ -828,7 +904,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
     for (var i = 0; i < BLOCKED_NETWORK_PATTERNS.length; i++) {
       if (BLOCKED_NETWORK_PATTERNS[i].test(url)) {
-        console.info('[Nobook] Blocked Fetch:', url);
         return Promise.resolve(new Response('{}', { status: 200 }));
       }
     }
@@ -845,7 +920,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     }
   };
 
-  // 4. J2TEAM Engine: WebSocket Proxy (Hide Typing & Seen)
   try {
       var origWS = window.WebSocket;
       window.WebSocket = new Proxy(origWS, {
@@ -855,14 +929,8 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
           ws.send = function(data) {
             try {
                if (typeof data === 'string' && data.indexOf('/ls_req') !== -1) {
-                   if (data.indexOf('"type":4') !== -1) {
-                       console.info('[Nobook] Chặn tín hiệu Đang Gõ (Typing)');
-                       return;
-                   }
-                   if (data.indexOf('"type":3') !== -1 && data.indexOf('"label":"21"') !== -1) {
-                       console.info('[Nobook] Chặn tín hiệu Đã Xem (Seen)');
-                       return; 
-                   }
+                   if (data.indexOf('"type":4') !== -1) return;
+                   if (data.indexOf('"type":3') !== -1 && data.indexOf('"label":"21"') !== -1) return; 
                }
             } catch(e) {}
             return origSend.apply(this, arguments);
@@ -871,145 +939,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         }
       });
   } catch(e) {}
-
-  // 5. STEALTH TIMER & ACCURATE USERNAME EXTRACTION
-  (function initOptimizedTimer() {
-    var STORAGE_KEY = 'nobook_fb_usage_seconds';
-    var DATE_KEY = 'nobook_fb_usage_date';
-    var POPUP_SHOWN_KEY = 'nobook_fb_popup_shown_cycle';
-    
-    var todayStr = new Date().toDateString();
-    if (localStorage.getItem(DATE_KEY) !== todayStr) {
-      localStorage.setItem(DATE_KEY, todayStr);
-      localStorage.setItem(STORAGE_KEY, '0');
-      localStorage.setItem(POPUP_SHOWN_KEY, '-1');
-    }
-
-    var spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
-
-    var badge = document.createElement('div');
-    badge.id = 'nobook-smart-timer-badge';
-    badge.style.cssText = 'position:fixed;top:48px;right:20px;background:rgba(20,22,28,0.85);' +
-      'color:#38bdf8;font-size:11px;font-weight:bold;padding:5px 10px;border-radius:12px;z-index:999999;font-family:monospace;' +
-      'pointer-events:none;display:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
-      'border:1px solid rgba(255,255,255,0.2);box-shadow:0 4px 14px rgba(0,0,0,0.5);transition:opacity 0.3s;';
-    document.body.appendChild(badge);
-
-    function getUserName() {
-      var commentBoxes = document.querySelectorAll(
-        '[aria-label*="Bình luận dưới tên" i], [placeholder*="Bình luận dưới tên" i], ' +
-        '[aria-label*="Comment as" i], [placeholder*="Comment as" i], div[data-sigil*="comment"] div[aria-label]'
-      );
-      for (var i = 0; i < commentBoxes.length; i++) {
-        var txt = commentBoxes[i].getAttribute('aria-label') || commentBoxes[i].getAttribute('placeholder') || '';
-        var match = txt.match(/(?:Bình luận dưới tên|Comment as)\s+([^.,\n]+)/i);
-        if (match && match[1] && match[1].trim().length > 1) {
-          var name = match[1].trim();
-          localStorage.setItem('nobook_cached_fb_username', name);
-          return name;
-        }
-      }
-
-      var profileEl = document.querySelector(
-        'a[aria-label*="Trang cá nhân của" i], [aria-label*="Trang cá nhân của" i], ' +
-        'a[aria-label*="Profile of" i], [aria-label*="Profile of" i], ' +
-        'div[aria-label*="Tài khoản" i] strong, [data-sigil*="profile"] strong, ' +
-        'div[role="feed"] strong, header h1, a[href*="/me/"]'
-      );
-      if (profileEl) {
-        var label = profileEl.getAttribute('aria-label') || profileEl.innerText || profileEl.textContent || '';
-        var pMatch = label.match(/(?:Trang cá nhân của|Profile of)\s+([^.,\n]+)/i);
-        if (pMatch && pMatch[1] && pMatch[1].trim().length > 1) {
-          var name = pMatch[1].trim();
-          localStorage.setItem('nobook_cached_fb_username', name);
-          return name;
-        }
-        if (label && label.length > 1 && label.indexOf('Facebook') === -1 && label.indexOf('Menu') === -1) {
-          var clean = label.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim();
-          if (clean.length > 1 && clean.length < 35) {
-            localStorage.setItem('nobook_cached_fb_username', clean);
-            return clean;
-          }
-        }
-      }
-
-      var cached = localStorage.getItem('nobook_cached_fb_username');
-      if (cached && cached.trim().length > 1) return cached.trim();
-
-      return 'bạn';
-    }
-
-    function showPopupWarning(minutes) {
-      var uName = getUserName();
-      var modal = document.createElement('div');
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;' +
-        'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
-      modal.innerHTML = 
-        '<div style="background:#242526;color:#fff;padding:24px;border-radius:18px;max-width:300px;width:86%;text-align:center;box-shadow:0 12px 36px rgba(0,0,0,0.7);border:1px solid rgba(255,255,255,0.1);">' +
-          '<div style="font-size:40px;margin-bottom:10px;">⏳</div>' +
-          '<div style="font-size:17px;font-weight:bold;margin-bottom:8px;line-height:1.3;">Nghỉ ngơi mắt nhé, ' + uName + '!</div>' +
-          '<div style="font-size:13px;color:#b0b3b8;margin-bottom:20px;line-height:1.4;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
-          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:11px;background:#1877f2;border:none;border-radius:10px;color:#fff;font-weight:bold;cursor:pointer;font-size:14px;box-shadow:0 4px 12px rgba(24,119,242,0.4);">Đã hiểu</button>' +
-        '</div>';
-      document.body.appendChild(modal);
-      document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
-          modal.remove(); 
-          badge.style.display = 'none'; 
-      };
-    }
-
-    setInterval(function () {
-      if (document.visibilityState === 'visible') {
-        spentSeconds += 1;
-        if (spentSeconds % 5 === 0) localStorage.setItem(STORAGE_KEY, spentSeconds.toString());
-        
-        var mins = Math.floor(spentSeconds / 60);
-        var secs = spentSeconds % 60;
-        
-        var cycle = Math.floor(mins / 30);
-        var nextThreshold = (cycle + 1) * 30;
-        var minsLeft = nextThreshold - mins;
-
-        if (minsLeft <= 2 && minsLeft > 0 && mins >= 1) {
-            badge.style.display = 'block';
-            var formattedSecs = secs < 10 ? '0' + secs : secs;
-            badge.textContent = '⏳ ' + mins + ':' + formattedSecs;
-        } else {
-            badge.style.display = 'none';
-        }
-
-        if (mins > 0 && mins % 30 === 0) {
-            var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
-            if (cycle > lastShownCycle) {
-                showPopupWarning(mins);
-                localStorage.setItem(POPUP_SHOWN_KEY, cycle.toString());
-            }
-        }
-      }
-    }, 1000);
-  })();
-
-  // 6. UPLOAD INTENT GATE
-  document.addEventListener('click', function(e) {
-      var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
-      if (target && window.UploadStateBridge) {
-          window.UploadStateBridge.notifyUploadIntent();
-      }
-  }, true);
-
-  // 7. RECORD TOP SITES FREQUENCY
-  setTimeout(function() {
-    try {
-      if (window.NobookFeaturesBridge && window.location.href.indexOf('facebook.com') !== -1) {
-        var pageTitle = document.title || 'Facebook';
-        if (pageTitle.indexOf('Facebook') === -1 && pageTitle.length > 2) {
-          window.NobookFeaturesBridge.recordTopSite(pageTitle, window.location.href);
-        } else if (window.location.pathname.length > 3) {
-          window.NobookFeaturesBridge.recordTopSite(window.location.pathname, window.location.href);
-        }
-      }
-    } catch(e) {}
-  }, 3000);
 
   console.info('[Nobook] Security & Privacy Engine Active.');
 })();
@@ -1020,7 +949,6 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
   if (window.__nobookAssistiveTouchActive) return;
   window.__nobookAssistiveTouchActive = true;
 
-  // Native AI Callback Listener
   window.__nobookAiCallbacks = {};
   window.__nobookAiNativeCallback = function(reqId, success, responseText) {
     if (window.__nobookAiCallbacks[reqId]) {
@@ -1029,7 +957,6 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     }
   };
 
-  // Helper: Clean Accessibility Text
   function cleanAccessibilityText(raw) {
     if (!raw) return "";
     return raw
@@ -1039,7 +966,6 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       .trim();
   }
 
-  // Universal UID Resolver from any URL / Input String
   function resolveUIDFromInput(inputStr) {
     if (!inputStr) return "";
     var str = inputStr.trim();
@@ -1065,7 +991,6 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     return "";
   }
 
-  // 1. ASSISTIVETOUCH 🤖 FROSTED GLASS BUTTON (15% Idle, 100% Touch, Snap-to-edge, 38px Avatar Size)
   var trigger = document.createElement('div');
   trigger.id = 'nobook-assistive-touch-btn';
   trigger.innerHTML = '🤖';
@@ -1146,7 +1071,14 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
   document.body.appendChild(trigger);
   resetIdle();
 
-  // 2. UNIFIED NOBOOK MASTER PANEL
+  window.navigateSocial = function(targetUrl) {
+    var panel = document.getElementById('nobook-master-panel');
+    if (panel) panel.style.display = 'none';
+    setTimeout(function() {
+      window.location.href = targetUrl;
+    }, 100);
+  };
+
   window.toggleNobookMenu = function() {
     var panel = document.getElementById('nobook-master-panel');
     if (!panel) {
@@ -1217,22 +1149,22 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
 
     if (tabName === 'ai') {
       var savedKey = localStorage.getItem('nobook_ai_key') || '';
-      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini-2.0-flash';
+      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini-2.5-flash';
 
       container.innerHTML = 
         '<div style="margin-bottom: 10px; display: flex; gap: 8px;">' +
           '<select id="nb-ai-model" style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px; font-size: 13px;">' +
-            '<option value="gemini-2.0-flash"' + (savedModel === 'gemini-2.0-flash' ? ' selected' : '') + '>Google Gemini 2.0 Flash (Mới nhất, siêu nhanh)</option>' +
+            '<option value="gemini-2.5-flash"' + (savedModel === 'gemini-2.5-flash' ? ' selected' : '') + '>Google Gemini 2.5 Flash (Mới nhất, siêu nhanh)</option>' +
+            '<option value="gemini-2.5-pro"' + (savedModel === 'gemini-2.5-pro' ? ' selected' : '') + '>Google Gemini 2.5 Pro (Suy luận sâu)</option>' +
             '<option value="gemini-1.5-flash"' + (savedModel === 'gemini-1.5-flash' ? ' selected' : '') + '>Google Gemini 1.5 Flash</option>' +
             '<option value="gemini-1.5-pro"' + (savedModel === 'gemini-1.5-pro' ? ' selected' : '') + '>Google Gemini 1.5 Pro</option>' +
             '<option value="gpt-4o"' + (savedModel === 'gpt-4o' ? ' selected' : '') + '>OpenAI GPT-4o</option>' +
-            '<option value="gpt-3.5-turbo"' + (savedModel === 'gpt-3.5-turbo' ? ' selected' : '') + '>OpenAI GPT-3.5 Turbo</option>' +
             '<option value="deepseek-chat"' + (savedModel === 'deepseek-chat' ? ' selected' : '') + '>DeepSeek V3 Chat</option>' +
             '<option value="grok-beta"' + (savedModel === 'grok-beta' ? ' selected' : '') + '>xAI Grok Beta</option>' +
           '</select>' +
         '</div>' +
         '<div style="margin-bottom: 10px;">' +
-          '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Nhập API Key tương ứng với model..." style="width: 100%; box-sizing: border-box; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
+          '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Key đơn hoặc Snip xoay vòng {Key1|Key2|Key3}..." style="width: 100%; box-sizing: border-box; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
         '</div>' +
         '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">' +
           '<button id="nb-btn-summarize" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">⚡ Tóm tắt bài viết</button>' +
@@ -1330,9 +1262,9 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
           '</div>' +
         '</div>' +
         '<div style="background: #20232d; padding: 14px; border-radius: 12px;">' +
-          '<div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Tìm Bài Viết Theo UID Trong Group Hoặc Toàn FB</div>' +
+          '<div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Tìm Bài Viết Theo UID Trong Nhiều Nhóm Hoặc Toàn FB</div>' +
           '<input type="text" id="nb-search-uid" placeholder="Nhập UID tác giả..." value="' + currentUid + '" style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
-          '<input type="text" id="nb-group-id" placeholder="Nhập UID Nhóm hoặc dán Link Nhóm (Tùy chọn)..." style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
+          '<input type="text" id="nb-group-id" placeholder="Nhập UID hoặc Link Nhóm (vd: id1,id2 hoặc link1,link2)..." style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
           '<div style="margin-bottom: 10px;">' +
             '<label style="font-size: 11px; color: #9ca3af; display: block; margin-bottom: 4px;">Mốc thời gian tìm kiếm:</label>' +
             '<select id="nb-time-filter" style="width: 100%; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 7px; font-size: 12px;">' +
@@ -1370,15 +1302,17 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       document.getElementById('nb-find-in-group').onclick = function() {
         var uid = document.getElementById('nb-search-uid').value.trim();
         var grpRaw = document.getElementById('nb-group-id').value.trim();
-        var grp = resolveUIDFromInput(grpRaw);
         var timeVal = document.getElementById('nb-time-filter').value;
         if (!uid) { alert("Vui lòng nhập UID!"); return; }
-        var targetUrl = grp ? ("https://m.facebook.com/groups/" + grp.replace(/[^0-9a-zA-Z._-]/g, '') + "/search/?q=" + encodeURIComponent(uid)) : ("https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid));
+
+        var groupTokens = grpRaw.split(',').map(function(s) { return resolveUIDFromInput(s.trim()); }).filter(function(s) { return s.length > 0; });
+        var firstGroup = groupTokens.length > 0 ? groupTokens[0] : "";
+
+        var targetUrl = firstGroup ? ("https://m.facebook.com/groups/" + firstGroup.replace(/[^0-9a-zA-Z._-]/g, '') + "/search/?q=" + encodeURIComponent(uid)) : ("https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid));
         if (timeVal !== 'all') {
           targetUrl += "&filters=" + encodeURIComponent('{"recent_posts:0":"' + timeVal + '"}');
         }
-        window.location.href = targetUrl;
-        document.getElementById('nobook-master-panel').style.display = 'none';
+        window.navigateSocial(targetUrl);
       };
 
       document.getElementById('nb-find-global').onclick = function() {
@@ -1389,8 +1323,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         if (timeVal !== 'all') {
           targetUrl += "&filters=" + encodeURIComponent('{"recent_posts:0":"' + timeVal + '"}');
         }
-        window.location.href = targetUrl;
-        document.getElementById('nobook-master-panel').style.display = 'none';
+        window.navigateSocial(targetUrl);
       };
     } else if (tabName === 'bookmarks') {
       var rawBm = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getBookmarks() : '[]';
@@ -1434,15 +1367,14 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         if (!item) return;
         var isFb = item.url.indexOf('facebook.com') !== -1 || item.url.indexOf('fb.com') !== -1;
         if (isFb) {
-          window.location.href = item.url;
+          window.navigateSocial(item.url);
         } else {
           if (confirm("Mở link này trong trình duyệt ngoài?")) {
             if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.openExternalUrl(item.url);
           } else {
-            window.location.href = item.url;
+            window.navigateSocial(item.url);
           }
         }
-        document.getElementById('nobook-master-panel').style.display = 'none';
       };
 
       window.deleteBookmark = function(idx) {
@@ -1482,7 +1414,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         var removed = bmList.length - unique.length;
         bmList = unique;
         if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
-        alert('Đã dọn dẹp thành công ' + removed + ' bookmark trùng lặp / rỗng!');
+        alert('Đã dọn dẹp thành công ' + removed + ' bookmark trùng lặp!');
         renderTab('bookmarks');
       };
     } else if (tabName === 'social') {
@@ -1492,24 +1424,24 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
             '<div style="font-weight: bold; font-size: 13px; color: #38bdf8; margin-bottom: 6px;">📜 QUẢN LÝ BÀI VIẾT (YOUR POSTS)</div>' +
             '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Quản lý tập trung bài viết, lọc theo ngày, quyền riêng tư, bài viết được tag.</div>' +
             '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/allactivity/?category_key=yourposts\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">📋 Nhật Ký Bài Đăng</button>' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/allactivity/?category_key=tagsposts\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🏷 Bài Được Gắn Thẻ</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/allactivity/?category_key=yourposts\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">📋 Nhật Ký Bài Đăng</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/allactivity/?category_key=tagsposts\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">🏷 Bài Được Gắn Thẻ</button>' +
             '</div>' +
           '</div>' +
           '<div style="background: #20232d; padding: 12px; border-radius: 10px;">' +
             '<div style="font-weight: bold; font-size: 13px; color: #a855f7; margin-bottom: 6px;">💬 TIN NHẮN & HỘI THOẠI (YOUR MESSAGES)</div>' +
             '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Truy cập nhanh hộp thư, tìm tin nhắn cũ, sao lưu đoạn chat.</div>' +
             '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/messages/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">📂 Mở Hộp Thư Web</button>' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/messages/?folder=unread\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🕰 Tin Chưa Đọc</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/messages/\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">📂 Mở Hộp Thư Web</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/messages/?folder=unread\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">🕰 Tin Chưa Đọc</button>' +
             '</div>' +
           '</div>' +
           '<div style="background: #20232d; padding: 12px; border-radius: 10px;">' +
             '<div style="font-weight: bold; font-size: 13px; color: #10b981; margin-bottom: 6px;">👥 BẠN BÈ & KẾT NỐI (YOUR CONNECTIONS)</div>' +
             '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Quản lý bạn bè, lời mời kết bạn, danh sách theo dõi và danh sách chặn.</div>' +
             '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/friends/center/requests/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🔔 Lời Mời Kết Bạn</button>' +
-              '<button onclick="window.location.href=\'https://m.facebook.com/privacy/blocking/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🚫 Danh Sách Chặn</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/friends/center/requests/\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">🔔 Lời Mời Kết Bạn</button>' +
+              '<button onclick="window.navigateSocial(\'https://m.facebook.com/privacy/blocking/\')" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; cursor: pointer;">🚫 Danh Sách Chặn</button>' +
             '</div>' +
           '</div>' +
         '</div>';
@@ -1535,7 +1467,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       } else {
         topSites.forEach(function(site) {
           html += 
-            '<div style="background: #20232d; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);" onclick="window.location.href=\'' + site.url + '\'">' +
+            '<div style="background: #20232d; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);" onclick="window.navigateSocial(\'' + site.url + '\')">' +
               '<div style="font-size: 12px; font-weight: bold; color: #38bdf8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + site.title + '</div>' +
               '<div style="font-size: 10px; color: #9ca3af; margin-top: 4px;">' + site.visits + ' lượt xem</div>' +
             '</div>';
@@ -1738,7 +1670,7 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         });
         if (sources[0].width || sources[0].bitrateMatch) return sources[0].url;
       }
-    } catch (e) { /* fall through to default */ }
+    } catch (e) { /* fall through */ }
 
     const candidate = videoElement.currentSrc || videoElement.src;
     if (!candidate || candidate.indexOf("blob:") === 0) {
@@ -2168,8 +2100,7 @@ private const val MESSENGER_GUARD_SCRIPT = """
         e.preventDefault();
         e.stopPropagation();
         if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-        console.info("[Nobook] Chuyển hướng Messenger Web");
-        window.location.href = "https://www.facebook.com/messages/";
+        window.location.href = "https://m.facebook.com/messages/";
         return;
       }
 
@@ -2183,10 +2114,7 @@ private const val MESSENGER_GUARD_SCRIPT = """
 
     var origOpen = window.open;
     window.open = function (url) {
-      if (isMessengerDeepLink(url)) {
-        console.info("[Nobook] Blocked window.open to Messenger deep link:", url);
-        return null;
-      }
+      if (isMessengerDeepLink(url)) return null;
       return origOpen.apply(window, arguments);
     };
 
@@ -2314,7 +2242,6 @@ private const val TEXT_SELECTION_SCRIPT = """
         document.body.removeChild(ta);
         return true;
       } catch (e) {
-        console.error('[Nobook] Copy failed:', e);
         return false;
       }
     }
@@ -2416,7 +2343,7 @@ private const val CONTRAST_GUARD_SCRIPT = """
             el.style.setProperty('color', '#ffffff', 'important');
             el.style.setProperty('caret-color', '#ffffff', 'important');
           }
-        } catch (e) { /* ignore per-node errors */ }
+        } catch (e) { /* ignore */ }
       });
     }
 
@@ -2588,7 +2515,6 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
         var video = entry.target;
         var viewingComments = isViewingComments();
 
-        // NẾU ĐANG TRONG TAB REELS / WATCH HOẶC MỞ COMMENT DIALOG -> TIẾP TỤC PHÁT KHÔNG BỊ DỪNG DÙ CUỘN XEM COMMENT SÂU
         if (viewingComments) {
           if (video.paused && video.dataset.nobookUserPaused !== '1') {
             var p = video.play();
@@ -2597,7 +2523,6 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
           return;
         }
 
-        // LƯỚT BÀI BÌNH THƯỜNG TRÊN FEED: TUÂN THỦ DỪNG KHI NGOÀI VIEWPORT ĐỂ TIẾT KIỆM PIN & CPU
         if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
           if (video.hasAttribute('data-nobook-paused')) {
             video.removeAttribute('data-nobook-paused');
@@ -2739,8 +2664,8 @@ fun NobookWebView(
     val state = rememberSaveableWebViewState(url)
     val navigator = rememberWebViewNavigator(
         requestInterceptor = ExternalRequestInterceptor { externalUrl ->
-            if (isMessengerAppDeepLink(externalUrl)) {
-                // Stay inside WebView
+            if (isMessengerAppDeepLink(externalUrl) || isFacebookInternalUrl(externalUrl)) {
+                // Giữ điều hướng nội bộ bên trong Nobook WebView
             } else if (isBlockedSite(externalUrl)) {
                 Toast.makeText(
                     context,
@@ -2962,7 +2887,6 @@ fun NobookWebView(
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
-    // Hard Resource Freezing & Lifecycle Management (0% CPU background, smooth resume)
     DisposableEffect(lifecycleOwner, state) {
         var freezeJob: kotlinx.coroutines.Job? = null
         val observer = LifecycleEventObserver { _, event ->
@@ -2974,9 +2898,8 @@ fun NobookWebView(
                         state.nativeWebView.settings.setRenderPriority(WebSettings.RenderPriority.LOW)
                         state.nativeWebView.setLayerType(View.LAYER_TYPE_NONE, null)
                     }
-                    // Đóng băng timer sau 3-5 phút không hoạt động để đạt 0% CPU
                     freezeJob = CoroutineScope(Dispatchers.Main).launch {
-                        delay(180000) // 3 phút
+                        delay(300000) // Đóng băng sau 5 phút để CPU về 0%
                         runCatching {
                             state.nativeWebView.pauseTimers()
                         }
@@ -3139,7 +3062,6 @@ fun NobookWebView(
                     settings.setRenderPriority(WebSettings.RenderPriority.HIGH)
                 }
 
-                // Tối ưu hóa tải ảnh/video mượt mà ngay cả khi chạy qua VPN / WireGuard
                 settings.loadsImagesAutomatically = true
                 settings.blockNetworkImage = false
             }
