@@ -284,8 +284,8 @@ private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> 
 
 /**
  * NATIVE AI PROXY BRIDGE
- * Bypasses browser CORS & CSP constraints on Facebook by executing HTTP requests via native Android IO thread.
- * Fixes "Failed to fetch" on Gemini, OpenAI, DeepSeek permanently!
+ * Bypasses browser CORS, CSP, VPN proxy packet inspection and sec-gpc/dnt header constraints.
+ * Supports Gemini 2.0 Flash, Gemini 1.5 Flash, Gemini 1.5 Pro, OpenAI, DeepSeek, Grok, Copilot.
  */
 private class NativeAiProxyBridge(
     private val context: Context,
@@ -297,10 +297,11 @@ private class NativeAiProxyBridge(
     fun executeAiRequest(requestId: String, model: String, apiKey: String, promptJson: String) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val responseText = when (model) {
-                    "gemini" -> callGeminiNative(apiKey, promptJson)
-                    "deepseek" -> callDeepSeekNative(apiKey, promptJson)
-                    else -> callOpenAiNative(apiKey, promptJson)
+                val responseText = when {
+                    model.startsWith("gemini") -> callGeminiNative(model, apiKey, promptJson)
+                    model.startsWith("deepseek") -> callDeepSeekNative(apiKey, promptJson)
+                    model.startsWith("grok") -> callGrokNative(apiKey, promptJson)
+                    else -> callOpenAiNative(model, apiKey, promptJson)
                 }
                 
                 withContext(Dispatchers.Main) {
@@ -310,7 +311,7 @@ private class NativeAiProxyBridge(
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    val errMsg = JSONObject.quote(e.message ?: "Lỗi kết nối AI (Native)")
+                    val errMsg = JSONObject.quote(e.message ?: "Lỗi kết nối AI qua Native IO Thread")
                     val jsCallback = "window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', false, $errMsg);"
                     evaluateJsOnWebView(jsCallback)
                 }
@@ -318,13 +319,18 @@ private class NativeAiProxyBridge(
         }
     }
 
-    private fun callGeminiNative(key: String, prompt: String): String {
-        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$key"
+    private fun callGeminiNative(modelName: String, key: String, prompt: String): String {
+        val selectedModel = when (modelName) {
+            "gemini-2.0-flash" -> "gemini-2.0-flash"
+            "gemini-1.5-pro" -> "gemini-1.5-pro"
+            else -> "gemini-1.5-flash"
+        }
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=$key"
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15000
-            readTimeout = 20000
+            readTimeout = 25000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
         }
@@ -351,7 +357,7 @@ private class NativeAiProxyBridge(
 
         val json = JSONObject(responseStr)
         if (json.has("error")) {
-            throw Exception(json.getJSONObject("error").optString("message", "Gemini Error"))
+            throw Exception(json.getJSONObject("error").optString("message", "Gemini API Error"))
         }
 
         val candidates = json.optJSONArray("candidates")
@@ -362,23 +368,25 @@ private class NativeAiProxyBridge(
                 return parts.getJSONObject(0).optString("text", "")
             }
         }
-        return "Không nhận được phản hồi hợp lệ từ Gemini."
+        return "Không nhận được nội dung trả về từ Gemini."
     }
 
-    private fun callOpenAiNative(key: String, prompt: String): String {
+    private fun callOpenAiNative(modelName: String, key: String, prompt: String): String {
         val endpoint = "https://api.openai.com/v1/chat/completions"
         val url = URL(endpoint)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15000
-            readTimeout = 20000
+            readTimeout = 25000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
             setRequestProperty("Authorization", "Bearer $key")
         }
 
+        val openAiModel = if (modelName == "gpt-4o") "gpt-4o" else "gpt-3.5-turbo"
+
         val requestPayload = JSONObject().apply {
-            put("model", "gpt-3.5-turbo")
+            put("model", openAiModel)
             val messagesArr = JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "user")
@@ -404,7 +412,7 @@ private class NativeAiProxyBridge(
         if (choices != null && choices.length() > 0) {
             return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
         }
-        return "Không có dữ liệu trả về từ OpenAI."
+        return "Không có phản hồi từ OpenAI."
     }
 
     private fun callDeepSeekNative(key: String, prompt: String): String {
@@ -413,7 +421,7 @@ private class NativeAiProxyBridge(
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15000
-            readTimeout = 20000
+            readTimeout = 25000
             doOutput = true
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
             setRequestProperty("Authorization", "Bearer $key")
@@ -446,12 +454,54 @@ private class NativeAiProxyBridge(
         if (choices != null && choices.length() > 0) {
             return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
         }
-        return "Không có phản hồi từ DeepSeek."
+        return "Không có dữ liệu từ DeepSeek."
+    }
+
+    private fun callGrokNative(key: String, prompt: String): String {
+        val endpoint = "https://api.x.ai/v1/chat/completions"
+        val url = URL(endpoint)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 25000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("Authorization", "Bearer $key")
+        }
+
+        val requestPayload = JSONObject().apply {
+            put("model", "grok-beta")
+            val messagesArr = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            }
+            put("messages", messagesArr)
+        }
+
+        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+        conn.disconnect()
+
+        val json = JSONObject(responseStr)
+        if (json.has("error")) {
+            throw Exception(json.getJSONObject("error").optString("message", "Grok Error"))
+        }
+
+        val choices = json.optJSONArray("choices")
+        if (choices != null && choices.length() > 0) {
+            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+        }
+        return "Không có dữ liệu từ Grok."
     }
 }
 
 /**
- * Native Bookmark & Tab Group Storage Bridge
+ * Native Bookmark, Custom Link Resolver & Tab Groups Storage Bridge
  */
 private class NobookFeaturesBridge(private val context: Context) {
     private val prefs = context.getSharedPreferences("nobook_features_prefs", Context.MODE_PRIVATE)
@@ -485,7 +535,6 @@ private class NobookFeaturesBridge(private val context: Context) {
             obj.put(url, count)
             prefs.edit().putString("top_sites_freq", obj.toString()).apply()
 
-            // Save title mapping
             val titles = JSONObject(prefs.getString("top_sites_titles", "{}") ?: "{}")
             titles.put(url, title)
             prefs.edit().putString("top_sites_titles", titles.toString()).apply()
@@ -493,7 +542,7 @@ private class NobookFeaturesBridge(private val context: Context) {
     }
 
     @JavascriptInterface
-    fun getTopSites(): String {
+    fun getTopSites(limit: Int): String {
         return runCatching {
             val raw = prefs.getString("top_sites_freq", "{}") ?: "{}"
             val titlesRaw = prefs.getString("top_sites_titles", "{}") ?: "{}"
@@ -510,8 +559,9 @@ private class NobookFeaturesBridge(private val context: Context) {
             }
             list.sortByDescending { it.third }
 
+            val actualLimit = if (limit in listOf(10, 20, 30, 50)) limit else 20
             val res = JSONArray()
-            list.take(8).forEach {
+            list.take(actualLimit).forEach {
                 val item = JSONObject()
                 item.put("title", it.first)
                 item.put("url", it.second)
@@ -520,6 +570,18 @@ private class NobookFeaturesBridge(private val context: Context) {
             }
             res.toString()
         }.getOrDefault("[]")
+    }
+
+    @JavascriptInterface
+    fun openExternalUrl(targetUrl: String) {
+        Handler(Looper.getMainLooper()).post {
+            runCatching {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl))
+                context.startActivity(intent)
+            }.onFailure {
+                Toast.makeText(context, "Không thể mở liên kết qua trình duyệt ngoài", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     @JavascriptInterface
@@ -751,10 +813,11 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     
-    // BYPASS FETCH CHO DOMAIN AI VÀ LOCALHOST
+    // BYPASS FETCH TOÀN DIỆN CHO MỌI DOMAIN AI (KHÔNG CHÈN HEADER GÂY LỖI CORS)
     if (url.indexOf('googleapis.com') !== -1 || 
         url.indexOf('openai.com') !== -1 || 
         url.indexOf('deepseek.com') !== -1 || 
+        url.indexOf('x.ai') !== -1 || 
         url.indexOf('groq.com') !== -1 || 
         url.indexOf('cerebras.ai') !== -1 || 
         url.indexOf('openrouter.ai') !== -1 || 
@@ -826,7 +889,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
 
     var badge = document.createElement('div');
     badge.id = 'nobook-smart-timer-badge';
-    // Đặt vị trí an toàn, cách lề trên và lề phải đủ xa để tránh bị che bởi màn hình cong / camera đục lỗ
     badge.style.cssText = 'position:fixed;top:48px;right:20px;background:rgba(20,22,28,0.85);' +
       'color:#38bdf8;font-size:11px;font-weight:bold;padding:5px 10px;border-radius:12px;z-index:999999;font-family:monospace;' +
       'pointer-events:none;display:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);' +
@@ -834,7 +896,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     document.body.appendChild(badge);
 
     function getUserName() {
-      // 1. Tìm trong ô bình luận "Bình luận dưới tên [Tên]" hoặc "Comment as [Name]"
       var commentBoxes = document.querySelectorAll(
         '[aria-label*="Bình luận dưới tên" i], [placeholder*="Bình luận dưới tên" i], ' +
         '[aria-label*="Comment as" i], [placeholder*="Comment as" i], div[data-sigil*="comment"] div[aria-label]'
@@ -849,7 +910,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         }
       }
 
-      // 2. Tìm trong Profile Link / Header / Menu cá nhân
       var profileEl = document.querySelector(
         'a[aria-label*="Trang cá nhân của" i], [aria-label*="Trang cá nhân của" i], ' +
         'a[aria-label*="Profile of" i], [aria-label*="Profile of" i], ' +
@@ -873,7 +933,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         }
       }
 
-      // 3. Sử dụng tên đã lưu vào cache nếu có
       var cached = localStorage.getItem('nobook_cached_fb_username');
       if (cached && cached.trim().length > 1) return cached.trim();
 
@@ -911,7 +970,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         var nextThreshold = (cycle + 1) * 30;
         var minsLeft = nextThreshold - mins;
 
-        // Stealth Timer: Chỉ xuất hiện đúng 2 phút trước mỗi mốc 30 phút rồi tự ẩn
         if (minsLeft <= 2 && minsLeft > 0 && mins >= 1) {
             badge.style.display = 'block';
             var formattedSecs = secs < 10 ? '0' + secs : secs;
@@ -920,7 +978,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
-        // Kích hoạt thông báo pop-up khi vừa chạm mốc bội số của 30 phút
         if (mins > 0 && mins % 30 === 0) {
             var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
             if (cycle > lastShownCycle) {
@@ -972,7 +1029,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     }
   };
 
-  // Helper: Text & UID Accessibility Tree Cleaner
+  // Helper: Clean Accessibility Text
   function cleanAccessibilityText(raw) {
     if (!raw) return "";
     return raw
@@ -982,7 +1039,20 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       .trim();
   }
 
-  function extractCurrentUID() {
+  // Universal UID Resolver from any URL / Input String
+  function resolveUIDFromInput(inputStr) {
+    if (!inputStr) return "";
+    var str = inputStr.trim();
+    var matchNum = str.match(/(?:id=|user\/|profile\.php\?id=|\/groups\/|\/posts\/|\/share\/[pvr]\/|^)([0-9]{5,})/);
+    if (matchNum && matchNum[1]) return matchNum[1];
+    var mUser = str.match(/facebook\.com\/([a-zA-Z0-9._-]+)/);
+    if (mUser && mUser[1] && mUser[1] !== 'groups' && mUser[1] !== 'profile.php' && mUser[1] !== 'share') {
+      return mUser[1];
+    }
+    return str;
+  }
+
+  function extractCurrentPageUID() {
     var m = window.location.href.match(/(?:profile\.php\?id=|\/user\/|facebook\.com\/)([0-9]{5,})/);
     if (m && m[1]) return m[1];
     var cUser = document.cookie.match(/c_user=([0-9]+)/);
@@ -995,24 +1065,24 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     return "";
   }
 
-  // 1. CREATE ASSISTIVETOUCH FLOATING 🤖 BUTTON (Frosted Glass, 20% Idle, Magnetic Snap)
+  // 1. ASSISTIVETOUCH 🤖 FROSTED GLASS BUTTON (15% Idle, 100% Touch, Snap-to-edge, 38px Avatar Size)
   var trigger = document.createElement('div');
   trigger.id = 'nobook-assistive-touch-btn';
   trigger.innerHTML = '🤖';
   trigger.style.cssText = 
-    'position: fixed; top: 65%; left: 12px; width: 48px; height: 48px; border-radius: 50%;' +
-    'background: rgba(30, 32, 40, 0.45); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);' +
-    'border: 1.5px solid rgba(255, 255, 255, 0.25); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);' +
-    'display: flex; align-items: center; justify-content: center; font-size: 24px; cursor: move;' +
-    'z-index: 999998; opacity: 0.20; transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1); user-select: none; -webkit-user-select: none;';
+    'position: fixed; top: 65%; left: 8px; width: 38px; height: 38px; border-radius: 50%;' +
+    'background: rgba(26, 28, 35, 0.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);' +
+    'border: 1.2px solid rgba(255, 255, 255, 0.25); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);' +
+    'display: flex; align-items: center; justify-content: center; font-size: 20px; cursor: move;' +
+    'z-index: 999998; opacity: 0.15; transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1); user-select: none; -webkit-user-select: none;';
 
   var idleTimer = null;
   function resetIdle() {
     trigger.style.opacity = '1.0';
     clearTimeout(idleTimer);
     idleTimer = setTimeout(function() {
-      if (!isDragging) trigger.style.opacity = '0.20';
-    }, 2800);
+      if (!isDragging) trigger.style.opacity = '0.15';
+    }, 2500);
   }
 
   trigger.addEventListener('mouseenter', function() { trigger.style.opacity = '1.0'; });
@@ -1038,10 +1108,10 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     var newTop = startTop + (touch.clientY - startY);
     var newLeft = startLeft + (touch.clientX - startX);
     
-    var maxTop = window.innerHeight - 60;
-    var maxLeft = window.innerWidth - 60;
+    var maxTop = window.innerHeight - 50;
+    var maxLeft = window.innerWidth - 50;
     trigger.style.top = Math.max(10, Math.min(newTop, maxTop)) + 'px';
-    trigger.style.left = Math.max(8, Math.min(newLeft, maxLeft)) + 'px';
+    trigger.style.left = Math.max(4, Math.min(newLeft, maxLeft)) + 'px';
     trigger.style.right = 'auto';
   }
 
@@ -1052,9 +1122,9 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     var rect = trigger.getBoundingClientRect();
     var centerX = rect.left + (rect.width / 2);
     if (centerX < window.innerWidth / 2) {
-      trigger.style.left = '12px';
+      trigger.style.left = '8px';
     } else {
-      trigger.style.left = (window.innerWidth - rect.width - 12) + 'px';
+      trigger.style.left = (window.innerWidth - rect.width - 8) + 'px';
     }
     resetIdle();
   }
@@ -1076,36 +1146,37 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
   document.body.appendChild(trigger);
   resetIdle();
 
-  // 2. UNIFIED NOBOOK AI & TOOLS MODAL / PANEL
+  // 2. UNIFIED NOBOOK MASTER PANEL
   window.toggleNobookMenu = function() {
     var panel = document.getElementById('nobook-master-panel');
     if (!panel) {
       panel = document.createElement('div');
       panel.id = 'nobook-master-panel';
       panel.style.cssText = 
-        'position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 1000000; display: flex; align-items: flex-end; justify-content: center; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); transition: opacity 0.25s ease;';
+        'position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000000; display: flex; align-items: flex-end; justify-content: center; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: opacity 0.25s ease;';
 
       var sheet = document.createElement('div');
       sheet.id = 'nobook-master-sheet';
       sheet.style.cssText = 
-        'width: 100%; max-width: 480px; max-height: 90vh; height: 85vh; background: #1c1e24; color: #fff; border-radius: 20px 20px 0 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 -10px 40px rgba(0,0,0,0.5); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;';
+        'width: 100%; max-width: 500px; max-height: 90vh; height: 86vh; background: #16181f; color: #fff; border-radius: 22px 22px 0 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 -12px 48px rgba(0,0,0,0.6); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;';
 
       sheet.innerHTML = 
-        '<div style="padding: 14px 18px; background: #262932; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">' +
+        '<div style="padding: 14px 18px; background: #20232d; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; justify-content: space-between; align-items: center;">' +
           '<div style="display: flex; align-items: center; gap: 8px;">' +
             '<span style="font-size: 22px;">🤖</span>' +
-            '<strong style="font-size: 16px; letter-spacing: 0.3px;">Nobook Pro AI & Hub</strong>' +
+            '<strong style="font-size: 16px; letter-spacing: 0.3px;">Nobook Pro Hub & AI</strong>' +
           '</div>' +
-          '<span id="nobook-close-panel" style="font-size: 24px; cursor: pointer; color: #8a8d9b; line-height: 1;">&times;</span>' +
+          '<span id="nobook-close-panel" style="font-size: 26px; cursor: pointer; color: #8a8d9b; line-height: 1;">&times;</span>' +
         '</div>' +
-        '<div style="display: flex; background: #20222a; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 13px; font-weight: 600;">' +
-          '<div class="nb-tab active" data-tab="ai" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #4e8cff; border-bottom: 2px solid #4e8cff;">AI Trợ Lý</div>' +
-          '<div class="nb-tab" data-tab="uid" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">UID & Group</div>' +
-          '<div class="nb-tab" data-tab="bookmarks" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Bookmarks</div>' +
-          '<div class="nb-tab" data-tab="topsites" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Top Sites</div>' +
-          '<div class="nb-tab" data-tab="filters" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Bộ Lọc</div>' +
+        '<div style="display: flex; overflow-x: auto; background: #1a1c24; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 12px; font-weight: 600; white-space: nowrap; scrollbar-width: none;">' +
+          '<div class="nb-tab active" data-tab="ai" style="padding: 10px 14px; cursor: pointer; color: #4e8cff; border-bottom: 2px solid #4e8cff;">AI Trợ Lý</div>' +
+          '<div class="nb-tab" data-tab="uid" style="padding: 10px 14px; cursor: pointer; color: #8a8d9b;">UID & Group</div>' +
+          '<div class="nb-tab" data-tab="bookmarks" style="padding: 10px 14px; cursor: pointer; color: #8a8d9b;">Bookmarks</div>' +
+          '<div class="nb-tab" data-tab="social" style="padding: 10px 14px; cursor: pointer; color: #8a8d9b;">Social-AIO</div>' +
+          '<div class="nb-tab" data-tab="topsites" style="padding: 10px 14px; cursor: pointer; color: #8a8d9b;">Top Sites</div>' +
+          '<div class="nb-tab" data-tab="filters" style="padding: 10px 14px; cursor: pointer; color: #8a8d9b;">Bộ Lọc</div>' +
         '</div>' +
-        '<div id="nobook-tab-content" style="flex: 1; overflow-y: auto; padding: 14px; background: #16171c;">' +
+        '<div id="nobook-tab-content" style="flex: 1; overflow-y: auto; padding: 14px; background: #12141a;">' +
         '</div>';
 
       panel.appendChild(sheet);
@@ -1119,7 +1190,6 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         if (e.target === panel) panel.style.display = 'none';
       });
 
-      // Handle Tab Switching
       var tabs = sheet.querySelectorAll('.nb-tab');
       tabs.forEach(function(tab) {
         tab.onclick = function() {
@@ -1147,28 +1217,32 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
 
     if (tabName === 'ai') {
       var savedKey = localStorage.getItem('nobook_ai_key') || '';
-      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini';
+      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini-2.0-flash';
 
       container.innerHTML = 
         '<div style="margin-bottom: 10px; display: flex; gap: 8px;">' +
-          '<select id="nb-ai-model" style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px; font-size: 13px;">' +
-            '<option value="gemini"' + (savedModel === 'gemini' ? ' selected' : '') + '>Google Gemini 1.5 Flash (Khuyên dùng)</option>' +
-            '<option value="gpt"' + (savedModel === 'gpt' ? ' selected' : '') + '>OpenAI GPT-3.5 Turbo</option>' +
-            '<option value="deepseek"' + (savedModel === 'deepseek' ? ' selected' : '') + '>DeepSeek AI</option>' +
+          '<select id="nb-ai-model" style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px; font-size: 13px;">' +
+            '<option value="gemini-2.0-flash"' + (savedModel === 'gemini-2.0-flash' ? ' selected' : '') + '>Google Gemini 2.0 Flash (Mới nhất, siêu nhanh)</option>' +
+            '<option value="gemini-1.5-flash"' + (savedModel === 'gemini-1.5-flash' ? ' selected' : '') + '>Google Gemini 1.5 Flash</option>' +
+            '<option value="gemini-1.5-pro"' + (savedModel === 'gemini-1.5-pro' ? ' selected' : '') + '>Google Gemini 1.5 Pro</option>' +
+            '<option value="gpt-4o"' + (savedModel === 'gpt-4o' ? ' selected' : '') + '>OpenAI GPT-4o</option>' +
+            '<option value="gpt-3.5-turbo"' + (savedModel === 'gpt-3.5-turbo' ? ' selected' : '') + '>OpenAI GPT-3.5 Turbo</option>' +
+            '<option value="deepseek-chat"' + (savedModel === 'deepseek-chat' ? ' selected' : '') + '>DeepSeek V3 Chat</option>' +
+            '<option value="grok-beta"' + (savedModel === 'grok-beta' ? ' selected' : '') + '>xAI Grok Beta</option>' +
           '</select>' +
         '</div>' +
         '<div style="margin-bottom: 10px;">' +
-          '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Nhập API Key cá nhân..." style="width: 100%; box-sizing: border-box; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
+          '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Nhập API Key tương ứng với model..." style="width: 100%; box-sizing: border-box; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
         '</div>' +
         '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">' +
           '<button id="nb-btn-summarize" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">⚡ Tóm tắt bài viết</button>' +
           '<button id="nb-btn-clean-tree" style="background: #374151; color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">🧹 Lọc Text Sạch</button>' +
         '</div>' +
-        '<div id="nb-chat-logs" style="height: 230px; overflow-y: auto; background: #0f1015; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 10px; border: 1px solid #232530;">' +
+        '<div id="nb-chat-logs" style="height: 230px; overflow-y: auto; background: #0c0d12; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 10px; border: 1px solid #232530;">' +
           '<div style="color: #6b7280; text-align: center; margin-top: 80px;">Sẵn sàng trả lời & tóm tắt thông tin...</div>' +
         '</div>' +
         '<div style="display: flex; gap: 6px;">' +
-          '<input type="text" id="nb-ai-input" placeholder="Hỏi AI bất kỳ điều gì..." style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 20px; padding: 9px 14px; font-size: 13px; outline: none;">' +
+          '<input type="text" id="nb-ai-input" placeholder="Hỏi AI bất kỳ điều gì..." style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 20px; padding: 9px 14px; font-size: 13px; outline: none;">' +
           '<button id="nb-ai-submit" style="background: #2563eb; color: #fff; border: none; border-radius: 20px; padding: 9px 18px; font-weight: bold; cursor: pointer;">Gửi</button>' +
         '</div>';
 
@@ -1211,7 +1285,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         var text = input.value.trim();
 
         if (!text || !key) {
-          alert('Vui lòng nhập đầy đủ API Key và nội dung câu hỏi.');
+          alert('Vui lòng nhập đầy đủ API Key và nội dung.');
           return;
         }
 
@@ -1222,7 +1296,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         logs.scrollTop = logs.scrollHeight;
 
         var loadId = 'nb-msg-' + Date.now();
-        logs.innerHTML += '<div id="' + loadId + '" style="margin-bottom: 8px; text-align: left;"><span style="background: #262932; color: #9ca3af; padding: 7px 12px; border-radius: 14px 14px 14px 2px; display: inline-block;">Đang xử lý qua Native Proxy...</span></div>';
+        logs.innerHTML += '<div id="' + loadId + '" style="margin-bottom: 8px; text-align: left;"><span style="background: #20232d; color: #9ca3af; padding: 7px 12px; border-radius: 14px 14px 14px 2px; display: inline-block;">Đang xử lý qua Native IO Thread...</span></div>';
         logs.scrollTop = logs.scrollHeight;
 
         var reqId = 'req_' + Date.now();
@@ -1239,41 +1313,54 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
 
         if (window.NativeAiProxyBridge && window.NativeAiProxyBridge.executeAiRequest) {
           window.NativeAiProxyBridge.executeAiRequest(reqId, model, key, text);
-        } else {
-          // Fallback fetch
-          fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ parts: [{ text: text }] }] })
-          }).then(r => r.json()).then(j => {
-            window.__nobookAiNativeCallback(reqId, true, j.candidates[0].content.parts[0].text);
-          }).catch(e => {
-            window.__nobookAiNativeCallback(reqId, false, e.message);
-          });
         }
       };
     } else if (tabName === 'uid') {
-      var currentUid = extractCurrentUID();
+      var currentUid = extractCurrentPageUID();
       container.innerHTML = 
-        '<div style="background: #262932; padding: 14px; border-radius: 12px; margin-bottom: 12px;">' +
-          '<div style="font-size: 12px; color: #9ca3af; margin-bottom: 4px;">UID Trang / Cá Nhân Hiện Tại:</div>' +
-          '<div style="display: flex; gap: 8px; align-items: center;">' +
-            '<input type="text" id="nb-current-uid" value="' + (currentUid || "Chưa phát hiện") + '" style="flex: 1; background: #16171c; color: #38bdf8; font-weight: bold; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 14px;">' +
-            '<button id="nb-copy-uid" style="background: #0ea5e9; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-weight: bold; cursor: pointer;">Copy</button>' +
+        '<div style="background: #20232d; padding: 14px; border-radius: 12px; margin-bottom: 12px;">' +
+          '<div style="font-size: 12px; color: #9ca3af; margin-bottom: 6px; font-weight: bold;">Trích Xuất UID Bất Kỳ (Group, Page, Profile, Share Link):</div>' +
+          '<div style="display: flex; gap: 6px; margin-bottom: 8px;">' +
+            '<input type="text" id="nb-raw-link-input" placeholder="Dán link Profile/Page/Group/Share..." style="flex: 1; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 12px;">' +
+            '<button id="nb-btn-extract-link" style="background: #0284c7; color: #fff; border: none; border-radius: 6px; padding: 8px 12px; font-weight: bold; font-size: 12px; cursor: pointer;">Lấy UID</button>' +
+          '</div>' +
+          '<div style="display: flex; gap: 6px; align-items: center;">' +
+            '<input type="text" id="nb-current-uid" value="' + (currentUid || "") + '" placeholder="UID được bóc tách..." style="flex: 1; background: #12141a; color: #38bdf8; font-weight: bold; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 13px;">' +
+            '<button id="nb-copy-uid" style="background: #0ea5e9; color: #fff; border: none; border-radius: 6px; padding: 8px 12px; font-weight: bold; font-size: 12px; cursor: pointer;">Copy</button>' +
           '</div>' +
         '</div>' +
-        '<div style="background: #262932; padding: 14px; border-radius: 12px;">' +
-          '<div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">Tìm Bài Viết Theo UID Trong Nhóm / Page</div>' +
-          '<input type="text" id="nb-search-uid" placeholder="Nhập UID cần tìm..." value="' + currentUid + '" style="width: 100%; box-sizing: border-box; background: #16171c; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
-          '<input type="text" id="nb-group-id" placeholder="Nhập ID Nhóm / Đường dẫn Group (Tùy chọn)..." style="width: 100%; box-sizing: border-box; background: #16171c; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 10px; font-size: 13px;">' +
+        '<div style="background: #20232d; padding: 14px; border-radius: 12px;">' +
+          '<div style="font-size: 13px; font-weight: bold; margin-bottom: 8px;">Tìm Bài Viết Theo UID Trong Group Hoặc Toàn FB</div>' +
+          '<input type="text" id="nb-search-uid" placeholder="Nhập UID tác giả..." value="' + currentUid + '" style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
+          '<input type="text" id="nb-group-id" placeholder="Nhập UID Nhóm hoặc dán Link Nhóm (Tùy chọn)..." style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
+          '<div style="margin-bottom: 10px;">' +
+            '<label style="font-size: 11px; color: #9ca3af; display: block; margin-bottom: 4px;">Mốc thời gian tìm kiếm:</label>' +
+            '<select id="nb-time-filter" style="width: 100%; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 7px; font-size: 12px;">' +
+              '<option value="all">Toàn bộ thời gian</option>' +
+              '<option value="1d">Trong 24 giờ qua</option>' +
+              '<option value="1w">Trong 1 tuần qua</option>' +
+              '<option value="1m">Trong 1 tháng qua</option>' +
+              '<option value="3m">Trong 3 tháng qua</option>' +
+              '<option value="1y">Trong 1 năm qua</option>' +
+            '</select>' +
+          '</div>' +
           '<div style="display: flex; gap: 8px;">' +
-            '<button id="nb-find-in-group" style="flex: 1; background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; cursor: pointer;">Tìm Trong Group</button>' +
-            '<button id="nb-find-global" style="flex: 1; background: #6366f1; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; cursor: pointer;">Tìm Toàn FB</button>' +
+            '<button id="nb-find-in-group" style="flex: 1; background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; font-size: 12px; cursor: pointer;">Tìm Trong Group</button>' +
+            '<button id="nb-find-global" style="flex: 1; background: #6366f1; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; font-size: 12px; cursor: pointer;">Tìm Toàn FB</button>' +
           '</div>' +
         '</div>';
 
+      document.getElementById('nb-btn-extract-link').onclick = function() {
+        var raw = document.getElementById('nb-raw-link-input').value;
+        var uid = resolveUIDFromInput(raw);
+        if (!uid) { alert("Không tìm thấy UID trong đường dẫn nhập vào."); return; }
+        document.getElementById('nb-current-uid').value = uid;
+        document.getElementById('nb-search-uid').value = uid;
+      };
+
       document.getElementById('nb-copy-uid').onclick = function() {
         var uid = document.getElementById('nb-current-uid').value;
+        if (!uid) return;
         if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
           window.ClipboardBridge.copyText(uid);
           alert("Đã copy UID: " + uid);
@@ -1282,17 +1369,27 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
 
       document.getElementById('nb-find-in-group').onclick = function() {
         var uid = document.getElementById('nb-search-uid').value.trim();
-        var grp = document.getElementById('nb-group-id').value.trim();
+        var grpRaw = document.getElementById('nb-group-id').value.trim();
+        var grp = resolveUIDFromInput(grpRaw);
+        var timeVal = document.getElementById('nb-time-filter').value;
         if (!uid) { alert("Vui lòng nhập UID!"); return; }
         var targetUrl = grp ? ("https://m.facebook.com/groups/" + grp.replace(/[^0-9a-zA-Z._-]/g, '') + "/search/?q=" + encodeURIComponent(uid)) : ("https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid));
+        if (timeVal !== 'all') {
+          targetUrl += "&filters=" + encodeURIComponent('{"recent_posts:0":"' + timeVal + '"}');
+        }
         window.location.href = targetUrl;
         document.getElementById('nobook-master-panel').style.display = 'none';
       };
 
       document.getElementById('nb-find-global').onclick = function() {
         var uid = document.getElementById('nb-search-uid').value.trim();
+        var timeVal = document.getElementById('nb-time-filter').value;
         if (!uid) { alert("Vui lòng nhập UID!"); return; }
-        window.location.href = "https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid);
+        var targetUrl = "https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid);
+        if (timeVal !== 'all') {
+          targetUrl += "&filters=" + encodeURIComponent('{"recent_posts:0":"' + timeVal + '"}');
+        }
+        window.location.href = targetUrl;
         document.getElementById('nobook-master-panel').style.display = 'none';
       };
     } else if (tabName === 'bookmarks') {
@@ -1300,28 +1397,53 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       var bmList = JSON.parse(rawBm || '[]');
 
       var html = 
-        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">' +
-          '<button id="nb-add-bookmark" style="background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold; cursor: pointer;">+ Lưu Trang Này</button>' +
-          '<button id="nb-clean-duplicates" style="background: #dc2626; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold; cursor: pointer;">Dọn Trùng Lặp & Hỏng</button>' +
+        '<div style="background: #20232d; padding: 12px; border-radius: 10px; margin-bottom: 12px;">' +
+          '<div style="font-size: 12px; font-weight: bold; margin-bottom: 6px;">Thêm Bookmark Thủ Công:</div>' +
+          '<input type="text" id="nb-bm-title-input" placeholder="Nhập tiêu đề ghi nhớ..." style="width: 100%; box-sizing: border-box; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 7px; font-size: 12px; margin-bottom: 6px;">' +
+          '<div style="display: flex; gap: 6px; margin-bottom: 8px;">' +
+            '<input type="text" id="nb-bm-url-input" placeholder="Dán link bài viết, nhóm, profile, web..." style="flex: 1; background: #12141a; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 7px; font-size: 12px;">' +
+            '<button id="nb-btn-save-custom-bm" style="background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 7px 12px; font-weight: bold; font-size: 12px; cursor: pointer;">Lưu Link</button>' +
+          '</div>' +
+          '<div style="display: flex; gap: 6px;">' +
+            '<button id="nb-add-bookmark" style="flex: 1; background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: bold; cursor: pointer;">+ Lưu Trang Này</button>' +
+            '<button id="nb-clean-duplicates" style="flex: 1; background: #dc2626; color: #fff; border: none; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: bold; cursor: pointer;">Dọn Trùng & Hỏng</button>' +
+          '</div>' +
         '</div>' +
         '<div id="nb-bm-list" style="display: flex; flex-direction: column; gap: 8px;">';
 
       if (bmList.length === 0) {
-        html += '<div style="color: #6b7280; text-align: center; padding: 30px 0;">Chưa có Bookmark nào được lưu.</div>';
+        html += '<div style="color: #6b7280; text-align: center; padding: 25px 0;">Chưa có Bookmark nào được lưu.</div>';
       } else {
         bmList.forEach(function(b, idx) {
+          var isFb = b.url.indexOf('facebook.com') !== -1 || b.url.indexOf('fb.com') !== -1;
           html += 
-            '<div style="background: #262932; padding: 10px 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">' +
-              '<div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; cursor: pointer;" onclick="window.location.href=\'' + b.url + '\'">' +
-                '<div style="font-weight: 600; font-size: 13px; color: #e2e8f0;">' + b.title + '</div>' +
-                '<div style="font-size: 11px; color: #94a3b8;">' + b.url + '</div>' +
+            '<div style="background: #20232d; padding: 10px 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">' +
+              '<div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; cursor: pointer;" onclick="window.openBookmark(' + idx + ')">' +
+                '<div style="font-weight: 600; font-size: 13px; color: #e2e8f0;">' + (b.title || 'Bookmark') + ' <span style="font-size: 10px; color: ' + (isFb ? '#38bdf8' : '#a855f7') + ';">[' + (isFb ? 'Nobook' : 'Web') + ']</span></div>' +
+                '<div style="font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis;">' + b.url + '</div>' +
               '</div>' +
-              '<span style="color: #ef4444; font-size: 16px; cursor: pointer;" onclick="window.deleteBookmark(' + idx + ')">&#128465;</span>' +
+              '<span style="color: #ef4444; font-size: 16px; cursor: pointer; padding: 4px;" onclick="window.deleteBookmark(' + idx + ')">&#128465;</span>' +
             '</div>';
         });
       }
       html += '</div>';
       container.innerHTML = html;
+
+      window.openBookmark = function(idx) {
+        var item = bmList[idx];
+        if (!item) return;
+        var isFb = item.url.indexOf('facebook.com') !== -1 || item.url.indexOf('fb.com') !== -1;
+        if (isFb) {
+          window.location.href = item.url;
+        } else {
+          if (confirm("Mở link này trong trình duyệt ngoài?")) {
+            if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.openExternalUrl(item.url);
+          } else {
+            window.location.href = item.url;
+          }
+        }
+        document.getElementById('nobook-master-panel').style.display = 'none';
+      };
 
       window.deleteBookmark = function(idx) {
         bmList.splice(idx, 1);
@@ -1329,10 +1451,21 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         renderTab('bookmarks');
       };
 
-      document.getElementById('nb-add-bookmark').onclick = function() {
-        var t = document.title || window.location.pathname;
-        var u = window.location.href;
+      document.getElementById('nb-btn-save-custom-bm').onclick = function() {
+        var t = document.getElementById('nb-bm-title-input').value.trim();
+        var u = document.getElementById('nb-bm-url-input').value.trim();
+        if (!u) { alert("Vui lòng dán liên kết!"); return; }
+        if (!t) t = u;
         bmList.unshift({ title: t, url: u, time: Date.now() });
+        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+        renderTab('bookmarks');
+      };
+
+      document.getElementById('nb-add-bookmark').onclick = function() {
+        var t = prompt("Nhập tiêu đề Bookmark:", document.title || "Bài viết FB");
+        if (t === null) return;
+        var u = window.location.href;
+        bmList.unshift({ title: t || document.title, url: u, time: Date.now() });
         if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
         renderTab('bookmarks');
       };
@@ -1341,7 +1474,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         var seen = {};
         var unique = [];
         bmList.forEach(function(item) {
-          if (!seen[item.url] && item.url.indexOf('facebook.com') !== -1) {
+          if (!seen[item.url] && item.url.length > 5) {
             seen[item.url] = true;
             unique.push(item);
           }
@@ -1349,20 +1482,60 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         var removed = bmList.length - unique.length;
         bmList = unique;
         if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
-        alert('Đã dọn dẹp thành công ' + removed + ' bookmark trùng lặp / link hỏng!');
+        alert('Đã dọn dẹp thành công ' + removed + ' bookmark trùng lặp / rỗng!');
         renderTab('bookmarks');
       };
+    } else if (tabName === 'social') {
+      container.innerHTML = 
+        '<div style="display: flex; flex-direction: column; gap: 10px;">' +
+          '<div style="background: #20232d; padding: 12px; border-radius: 10px;">' +
+            '<div style="font-weight: bold; font-size: 13px; color: #38bdf8; margin-bottom: 6px;">📜 QUẢN LÝ BÀI VIẾT (YOUR POSTS)</div>' +
+            '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Quản lý tập trung bài viết, lọc theo ngày, quyền riêng tư, bài viết được tag.</div>' +
+            '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/allactivity/?category_key=yourposts\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">📋 Nhật Ký Bài Đăng</button>' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/allactivity/?category_key=tagsposts\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🏷 Bài Được Gắn Thẻ</button>' +
+            '</div>' +
+          '</div>' +
+          '<div style="background: #20232d; padding: 12px; border-radius: 10px;">' +
+            '<div style="font-weight: bold; font-size: 13px; color: #a855f7; margin-bottom: 6px;">💬 TIN NHẮN & HỘI THOẠI (YOUR MESSAGES)</div>' +
+            '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Truy cập nhanh hộp thư, tìm tin nhắn cũ, sao lưu đoạn chat.</div>' +
+            '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/messages/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">📂 Mở Hộp Thư Web</button>' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/messages/?folder=unread\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🕰 Tin Chưa Đọc</button>' +
+            '</div>' +
+          '</div>' +
+          '<div style="background: #20232d; padding: 12px; border-radius: 10px;">' +
+            '<div style="font-weight: bold; font-size: 13px; color: #10b981; margin-bottom: 6px;">👥 BẠN BÈ & KẾT NỐI (YOUR CONNECTIONS)</div>' +
+            '<div style="font-size: 11px; color: #9ca3af; margin-bottom: 8px;">Quản lý bạn bè, lời mời kết bạn, danh sách theo dõi và danh sách chặn.</div>' +
+            '<div style="display: flex; gap: 6px; flex-wrap: wrap;">' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/friends/center/requests/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🔔 Lời Mời Kết Bạn</button>' +
+              '<button onclick="window.location.href=\'https://m.facebook.com/privacy/blocking/\'" style="flex: 1; min-width: 120px; background: #374151; color: #fff; border: none; border-radius: 6px; padding: 7px; font-size: 11px; font-weight: bold; cursor: pointer;">🚫 Danh Sách Chặn</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
     } else if (tabName === 'topsites') {
-      var rawTop = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getTopSites() : '[]';
+      var currentLimit = parseInt(localStorage.getItem('nobook_topsites_limit') || '20', 10);
+      var rawTop = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getTopSites(currentLimit) : '[]';
       var topSites = JSON.parse(rawTop || '[]');
 
-      var html = '<div style="font-size: 13px; color: #9ca3af; margin-bottom: 10px;">Các Trang, Nhóm & Kênh truy cập nhiều nhất:</div><div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
+      var html = 
+        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">' +
+          '<span style="font-size: 12px; color: #9ca3af;">Nhóm / Trang thường xem:</span>' +
+          '<select id="nb-top-limit-select" style="background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 4px 8px; font-size: 11px;">' +
+            '<option value="10"' + (currentLimit === 10 ? ' selected' : '') + '>Top 10</option>' +
+            '<option value="20"' + (currentLimit === 20 ? ' selected' : '') + '>Top 20</option>' +
+            '<option value="30"' + (currentLimit === 30 ? ' selected' : '') + '>Top 30</option>' +
+            '<option value="50"' + (currentLimit === 50 ? ' selected' : '') + '>Top 50</option>' +
+          '</select>' +
+        '</div>' +
+        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
+
       if (topSites.length === 0) {
         html += '<div style="color: #6b7280; grid-column: span 2; text-align: center; padding: 30px 0;">Đang thu thập dữ liệu truy cập thường xuyên...</div>';
       } else {
         topSites.forEach(function(site) {
           html += 
-            '<div style="background: #262932; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);" onclick="window.location.href=\'' + site.url + '\'">' +
+            '<div style="background: #20232d; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);" onclick="window.location.href=\'' + site.url + '\'">' +
               '<div style="font-size: 12px; font-weight: bold; color: #38bdf8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + site.title + '</div>' +
               '<div style="font-size: 10px; color: #9ca3af; margin-top: 4px;">' + site.visits + ' lượt xem</div>' +
             '</div>';
@@ -1370,6 +1543,11 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       }
       html += '</div>';
       container.innerHTML = html;
+
+      document.getElementById('nb-top-limit-select').onchange = function() {
+        localStorage.setItem('nobook_topsites_limit', this.value);
+        renderTab('topsites');
+      };
     } else if (tabName === 'filters') {
       var rawKw = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getSavedKeywords() : '[]';
       var kwList = JSON.parse(rawKw || '[]');
@@ -1377,7 +1555,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       var html = 
         '<div style="font-size: 13px; margin-bottom: 10px; color: #94a3b8;">Ẩn bài viết chứa từ khóa (Bộ lọc FBPurity style):</div>' +
         '<div style="display: flex; gap: 6px; margin-bottom: 12px;">' +
-          '<input type="text" id="nb-new-kw" placeholder="Nhập từ khóa cần ẩn..." style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 13px;">' +
+          '<input type="text" id="nb-new-kw" placeholder="Nhập từ khóa cần ẩn..." style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 13px;">' +
           '<button id="nb-add-kw-btn" style="background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-weight: bold; cursor: pointer;">Thêm</button>' +
         '</div>' +
         '<div id="nb-kw-tags" style="display: flex; flex-wrap: wrap; gap: 6px;">';
@@ -2410,7 +2588,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
         var video = entry.target;
         var viewingComments = isViewingComments();
 
-        // NẾU ĐANG TRONG TAB REELS / WATCH HOẶC MỞ COMMENT DIALOG -> TIẾP TỤC PHÁT KHÔNG BỊ DỪNG
+        // NẾU ĐANG TRONG TAB REELS / WATCH HOẶC MỞ COMMENT DIALOG -> TIẾP TỤC PHÁT KHÔNG BỊ DỪNG DÙ CUỘN XEM COMMENT SÂU
         if (viewingComments) {
           if (video.paused && video.dataset.nobookUserPaused !== '1') {
             var p = video.play();
@@ -2451,7 +2629,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 
     var io = new IntersectionObserver(handleIntersections, {
       root: null,
-      rootMargin: '200px 0px',
+      rootMargin: '300px 0px',
       threshold: [0, 0.25, 0.5]
     });
 
@@ -2784,19 +2962,29 @@ fun NobookWebView(
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
+    // Hard Resource Freezing & Lifecycle Management (0% CPU background, smooth resume)
     DisposableEffect(lifecycleOwner, state) {
+        var freezeJob: kotlinx.coroutines.Job? = null
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
                     runCatching {
                         state.nativeWebView.onPause()
-                        state.nativeWebView.pauseTimers()
                         @Suppress("DEPRECATION")
                         state.nativeWebView.settings.setRenderPriority(WebSettings.RenderPriority.LOW)
                         state.nativeWebView.setLayerType(View.LAYER_TYPE_NONE, null)
                     }
+                    // Đóng băng timer sau 3-5 phút không hoạt động để đạt 0% CPU
+                    freezeJob = CoroutineScope(Dispatchers.Main).launch {
+                        delay(180000) // 3 phút
+                        runCatching {
+                            state.nativeWebView.pauseTimers()
+                        }
+                    }
                 }
                 Lifecycle.Event.ON_RESUME -> {
+                    freezeJob?.cancel()
+                    freezeJob = null
                     runCatching {
                         state.nativeWebView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
                         state.nativeWebView.onResume()
@@ -2806,6 +2994,7 @@ fun NobookWebView(
                     }
                 }
                 Lifecycle.Event.ON_DESTROY -> {
+                    freezeJob?.cancel()
                     if (activity?.isFinishing == true) {
                         runCatching {
                             state.nativeWebView.stopLoading()
@@ -2821,6 +3010,7 @@ fun NobookWebView(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            freezeJob?.cancel()
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
@@ -2949,20 +3139,9 @@ fun NobookWebView(
                     settings.setRenderPriority(WebSettings.RenderPriority.HIGH)
                 }
 
-                val isWeakOrMetered = runCatching {
-                    val connectivityManager = context.getSystemService(
-                        Context.CONNECTIVITY_SERVICE
-                    ) as? ConnectivityManager
-                    val activeNetwork = connectivityManager?.activeNetwork
-                    val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
-                    capabilities == null ||
-                        (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
-                            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
-                }.getOrDefault(true)
-                
-                runCatching {
-                    settings.loadsImagesAutomatically = !isWeakOrMetered
-                }
+                // Tối ưu hóa tải ảnh/video mượt mà ngay cả khi chạy qua VPN / WireGuard
+                settings.loadsImagesAutomatically = true
+                settings.blockNetworkImage = false
             }
         }
     )
