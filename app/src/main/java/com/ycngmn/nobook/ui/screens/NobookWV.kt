@@ -179,7 +179,7 @@ private val MONETIZED_SHORTLINK_HOSTS = setOf(
     "2.taobao.com",
     "amzn.to", "amzn.eu", "amzn.asia", "a.co",
     "t.co", "x.com", "redd.it", "bit.ly", "tinyurl.com", "goo.gl",
-    "maps.app.goo.gl", "zalo.me", "chat.zalo.me", "fb.me", "fb.watch"
+    "maps.app.goo.gl", "zalo.me", "chat.zalo.me", "fb.me", "fb.watch", "youtu.be"
 )
 
 private fun isMonetizedShortLink(url: String): Boolean {
@@ -462,7 +462,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     
-    // BYPASS FETCH CHO GOOGLE GEMINI, OPENAI, DEEPSEEK, GROQ ĐỂ TRÁNH LỖI CORS "Failed to fetch"
+    // BYPASS FETCH CHO MỌI API AI (TRÁNH LỖI CORS "Failed to fetch")
     if (url.indexOf('googleapis.com') !== -1 || 
         url.indexOf('openai.com') !== -1 || 
         url.indexOf('deepseek.com') !== -1 || 
@@ -529,7 +529,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. SMART FB TIMER (TÀNG HÌNH, CHỈ HIỆN ĐẾM NGƯỢC 2 PHÚT TRƯỚC MỖI MỐC 30 PHÚT)
+  // 5. SMART FB TIMER (TÀNG HÌNH, HIỆN 2 PHÚT TRƯỚC MỐC 30 PHÚT, KÈM TÊN TÀI KHOẢN)
   (function initOptimizedTimer() {
     var STORAGE_KEY = 'nobook_fb_usage_seconds';
     var DATE_KEY = 'nobook_fb_usage_date';
@@ -551,14 +551,20 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       'pointer-events:none;display:none;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);transition: opacity 0.3s;';
     document.body.appendChild(badge);
 
+    function getUserName() {
+      var nameEl = document.querySelector('div[role="feed"] strong, header h1, [aria-label*="trang cá nhân" i]');
+      return nameEl ? (nameEl.innerText || nameEl.textContent || 'bạn') : 'bạn';
+    }
+
     function showPopupWarning(minutes) {
+      var uName = getUserName();
       var modal = document.createElement('div');
       modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;' +
         'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
       modal.innerHTML = 
         '<div style="background:#242526;color:#fff;padding:20px;border-radius:14px;max-width:280px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.6);">' +
           '<div style="font-size:36px;margin-bottom:8px;">⏳</div>' +
-          '<div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi chút nhé!</div>' +
+          '<div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi mắt nhé, ' + uName + '!</div>' +
           '<div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
           '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;font-size:14px;">Đã hiểu</button>' +
         '</div>';
@@ -578,9 +584,8 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         var secs = spentSeconds % 60;
         
         var cycle = Math.floor(mins / 30);
-        var nextThreshold = (cycle + 1) * 30; // 30, 60, 90, 120, 150...
+        var nextThreshold = (cycle + 1) * 30;
 
-        // Hiện badge 10px đếm ngược đúng 2 phút trước mỗi mốc (28m->30m, 58m->60m, 88m->90m...)
         if (nextThreshold - mins <= 2 && nextThreshold - mins > 0) {
             badge.style.display = 'block';
             var formattedSecs = secs < 10 ? '0' + secs : secs;
@@ -589,7 +594,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
             badge.style.display = 'none';
         }
 
-        // Bật popup đúng mốc chẵn
         if (mins > 0 && mins % 30 === 0) {
             var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
             if (cycle > lastShownCycle) {
@@ -609,7 +613,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // 7. DRAGGABLE AI ASSISTANT (BYOK + SUMMARIZERRRR CORE + SNAP TO EDGE)
+  // 7. DRAGGABLE AI ASSISTANT (ASSISTIVETOUCH UI, PERSISTENT API KEY, CLEAN EXTRACTION)
   window.toggleNobookAI = function() {
       var aiSidebar = document.getElementById('nobook-ai-sidebar');
       if (!aiSidebar) {
@@ -634,20 +638,31 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
                   '<button id="nobook-import-cookie" style="flex:1;padding:6px;background:#FF9800;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">Nhập Cookie</button>' +
                 '</div>' +
                 '<div style="display:flex; gap:6px;">' +
-                  '<button id="nobook-summarize-page" style="flex:1;padding:6px;background:#673AB7;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">⚡ Tóm tắt Trang</button>' +
-                  '<button id="nobook-get-uid" style="flex:1;padding:6px;background:#009688;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">🔍 Lấy UID Page</button>' +
+                  '<button id="nobook-summarize-page" style="flex:1;padding:6px;background:#673AB7;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">⚡ Tóm tắt Bài</button>' +
+                  '<button id="nobook-get-uid" style="flex:1;padding:6px;background:#009688;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">🔍 Lấy UID</button>' +
                 '</div>' +
             '</div>' +
             '<div id="nobook-ai-chat" style="flex:1;padding:12px;overflow-y:auto;background:#f0f2f5;font-size:13px;display:flex;flex-direction:column;line-height:1.4;"></div>' +
             '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#fff;">' +
-                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI hoặc phân tích link..." style="flex:1;padding:8px 12px;border:1px solid #ccc;border-radius:20px;outline:none;font-size:13px;">' +
+                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI hoặc dán link bài viết..." style="flex:1;padding:8px 12px;border:1px solid #ccc;border-radius:20px;outline:none;font-size:13px;">' +
                 '<button id="nobook-ai-send" style="background:#1877f2;color:#fff;border:none;padding:8px 14px;margin-left:6px;border-radius:20px;cursor:pointer;font-weight:bold;">Gửi</button>' +
             '</div>';
           document.body.appendChild(aiSidebar);
           
           setTimeout(function() { aiSidebar.style.right = '0'; }, 10);
 
-          // Trích xuất Cookie
+          var savedKey = localStorage.getItem('nobook_ai_key') || '';
+          var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini';
+          document.getElementById('nobook-ai-key').value = savedKey;
+          document.getElementById('nobook-ai-model').value = savedModel;
+
+          document.getElementById('nobook-ai-key').onchange = function() {
+              localStorage.setItem('nobook_ai_key', this.value.trim());
+          };
+          document.getElementById('nobook-ai-model').onchange = function() {
+              localStorage.setItem('nobook_ai_model', this.value);
+          };
+
           document.getElementById('nobook-extract-cookie').onclick = function() {
               var cookies = document.cookie;
               var formatted = "FB Cookies:\n" + cookies.split(';').map(c => c.trim()).join('\n');
@@ -659,7 +674,6 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               }
           };
 
-          // Nhập Cookie
           document.getElementById('nobook-import-cookie').onclick = function() {
               var input = prompt("Dán FB Cookies vào đây:");
               if (input) {
@@ -675,32 +689,42 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               }
           };
 
-          // Tóm tắt thông minh trang hiện tại (Summarizerrrr Core)
           document.getElementById('nobook-summarize-page').onclick = function() {
-              var content = "";
+              var cleanText = "";
               var articles = document.querySelectorAll('div[role="article"]');
               if (articles.length > 0) {
                   articles.forEach(function(a, idx) {
-                      if (idx < 3) content += (a.innerText || "") + "\n---\n";
+                      if (idx < 2) {
+                          var t = (a.innerText || "").replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim();
+                          cleanText += t + "\n---\n";
+                      }
                   });
               } else {
-                  content = document.body.innerText.slice(0, 3000);
+                  cleanText = document.body.innerText.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").slice(0, 2500);
               }
-              document.getElementById('nobook-ai-input').value = "Tóm tắt ngắn gọn nội dung sau:\n" + content;
+              document.getElementById('nobook-ai-input').value = "Tóm tắt súc tích nội dung bài viết và các bình luận chính sau:\n" + cleanText;
               document.getElementById('nobook-ai-send').click();
           };
 
-          // Lấy UID Profile / Page
           document.getElementById('nobook-get-uid').onclick = function() {
-              var uidMatch = document.cookie.match(/c_user=([0-9]+)/);
-              var uid = uidMatch ? uidMatch[1] : "Không tìm thấy";
-              alert("UID tài khoản hiện tại: " + uid + "\nURL hiện tại: " + window.location.href);
+              var uid = "";
+              var m = window.location.href.match(/(?:profile\.php\?id=|\/user\/|facebook\.com\/)([0-9]{5,})/);
+              if (m && m[1]) {
+                  uid = m[1];
+              } else {
+                  var cUser = document.cookie.match(/c_user=([0-9]+)/);
+                  uid = cUser ? cUser[1] : "Không tìm thấy";
+              }
+              if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+                  window.ClipboardBridge.copyText(uid);
+                  alert("UID: " + uid + " (Đã sao chép vào Clipboard)");
+              } else {
+                  prompt("UID của đối tượng:", uid);
+              }
           };
 
-          // Đóng Sidebar
           document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.right = '-350px'; };
 
-          // Gửi câu hỏi đến AI
           document.getElementById('nobook-ai-send').onclick = async function() {
               var input = document.getElementById('nobook-ai-input');
               var chat = document.getElementById('nobook-ai-chat');
@@ -709,7 +733,9 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               var text = input.value.trim();
               if (!text || !key) { alert('Vui lòng nhập API Key và nội dung.'); return; }
 
-              chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#1877f2;color:#fff;padding:8px 12px;border-radius:16px 16px 2px 16px;display:inline-block;max-width:85%;">' + text.replace(/\n/g, '<br>') + '</span></div>';
+              localStorage.setItem('nobook_ai_key', key);
+
+              chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#1877f2;color:#fff;padding:8px 12px;border-radius:16px 16px 2px 16px;display:inline-block;max-width:85%;word-break:break-word;">' + text.replace(/\n/g, '<br>') + '</span></div>';
               input.value = '';
               chat.scrollTop = chat.scrollHeight;
 
@@ -722,11 +748,11 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
               try {
                   var responseText = "";
                   if (model === 'gemini') {
-                      // Fix triệt để gọi API Gemini
+                      var cleanPrompt = text.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
                       const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ contents: [{ parts: [{ text: text }] }] })
+                          body: JSON.stringify({ contents: [{ parts: [{ text: cleanPrompt }] }] })
                       });
                       const json = await res.json();
                       if (json.error) throw new Error(json.error.message);
@@ -761,13 +787,13 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   };
 
-  // NÚT TRIGGER DẠNG ASSISTIVETOUCH (MỜ ẢO, SNAP TO EDGE)
+  // NÚT ASSISTIVETOUCH (MỜ ẢO, SNAP TO EDGE)
   var aiTrigger = document.createElement('div');
   aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
-  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.4);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.4;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.2);';
+  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.45);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.35;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.2);';
   
   aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
-  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.4'; };
+  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.35'; };
   
   var isTriggerDragging = false;
   var trigStartY, tStartTop, trigStartX, tStartLeft;
@@ -817,7 +843,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.addEventListener('touchend', snapToEdge);
 
   aiTrigger.onclick = function(e) {
-      if (Math.abs(e.clientY - trigStartY) < 5 && Math.abs(e.clientX - trigStartX) < 5) {
+      if (Math.abs(e.clientY - trigStartY) < 6 && Math.abs(e.clientX - trigStartX) < 6) {
           window.toggleNobookAI(); 
       }
   };
@@ -953,34 +979,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
           return m[1].replace(/\\/g, '/').replace(/\\u0025/g, '%');
         }
       }
-    } catch (e) { /* ignore */ }
-    return null;
-  };
-
-  const extractOriginalImageUrlFromPage = () => {
-    try {
-      const html = document.documentElement.innerHTML;
-      let best = null;
-      let bestArea = -1;
-
-      const patternsOrdered = [
-        /"image":\{"height":(\d+),"uri":"([^"]+)","width":(\d+)\}/g,
-        /"image":\{"uri":"([^"]+)","width":(\d+),"height":(\d+)\}/g
-      ];
-
-      patternsOrdered.forEach((re, idx) => {
-        let m;
-        while ((m = re.exec(html)) !== null) {
-          let uri, w, h;
-          if (idx === 0) { h = parseInt(m[1], 10); uri = m[2]; w = parseInt(m[3], 10); }
-          else { uri = m[1]; w = parseInt(m[2], 10); h = parseInt(m[3], 10); }
-          if (w < MIN_ORIGINAL_SIDE || h < MIN_ORIGINAL_SIDE) continue;
-          const area = (w || 0) * (h || 0);
-          if (area > bestArea) { bestArea = area; best = uri; }
-        }
-      });
-
-      if (best) return best.replace(/\\/g, '/').replace(/\\u0025/g, '%');
     } catch (e) { /* ignore */ }
     return null;
   };
@@ -1986,6 +1984,13 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
     var handleIntersections = function (entries) {
       entries.forEach(function (entry) {
         var video = entry.target;
+        
+        // KIỂM TRA NẾU ĐANG XEM BÌNH LUẬN TRONG REELS / WATCH / POST THÌ KHÔNG TỰ PAUSE VIDEO
+        var inWatchOrReels = window.location.pathname.indexOf('/watch') !== -1 || 
+                             window.location.pathname.indexOf('/reel') !== -1 || 
+                             window.location.pathname.indexOf('/videos') !== -1;
+        var isCommentSheetOpen = !!document.querySelector('div[role="dialog"], [data-sigil*="comment"]');
+
         if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
           if (video.hasAttribute('data-nobook-paused')) {
             video.removeAttribute('data-nobook-paused');
@@ -1997,6 +2002,10 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
             }
           }
         } else {
+          // NẾU ĐANG XEM COMMENT VÀ VIDEO VẪN NẰM TRONG VÙNG NHÌN THẤY THÌ KHÔNG PAUSE
+          if ((inWatchOrReels || isCommentSheetOpen) && entry.intersectionRatio > 0) {
+              return;
+          }
           if (!video.paused) {
             video.dataset.nobookWasPlaying = '1';
             video.pause();
@@ -2112,7 +2121,7 @@ fun NobookWebView(
     val navigator = rememberWebViewNavigator(
         requestInterceptor = ExternalRequestInterceptor { externalUrl ->
             if (isMessengerAppDeepLink(externalUrl)) {
-                // Prevent jumping to native app
+                // Stay inside WebView
             } else if (isBlockedSite(externalUrl)) {
                 Toast.makeText(
                     context,
