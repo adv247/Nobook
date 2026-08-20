@@ -1,7 +1,10 @@
 package com.ycngmn.nobook.ui.screens
 
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +12,7 @@ import android.view.View
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.widget.Toast
@@ -50,6 +54,7 @@ import com.multiplatform.webview.web.rememberSaveableWebViewState
 import com.multiplatform.webview.web.rememberWebViewNavigator
 import com.ycngmn.nobook.R
 import com.ycngmn.nobook.ui.components.NetworkErrorDialog
+import com.ycngmn.nobook.ui.components.SplashLoading
 import com.ycngmn.nobook.ui.components.settings.SettingsDialog
 import com.ycngmn.nobook.ui.viewmodel.MainViewModel
 import com.ycngmn.nobook.ui.viewmodel.SettingsViewModel
@@ -69,56 +74,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 
-private const val ANTI_RELOAD_SCRIPT = """
-(function () {
-  try {
-    if (window.__nobookAntiReloadActive) return;
-    window.__nobookAntiReloadActive = true;
-
-    var defineAlways = function (obj, prop, value) {
-      try {
-        Object.defineProperty(obj, prop, { configurable: true, get: function () { return value; } });
-      } catch (e) {}
-    };
-
-    defineAlways(document, "visibilityState", "visible");
-    defineAlways(document, "hidden", false);
-    defineAlways(document, "webkitVisibilityState", "visible");
-    defineAlways(document, "webkitHidden", false);
-
-    var blocked = ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide", "freeze"];
-    var origAdd = EventTarget.prototype.addEventListener;
-    var origDispatch = EventTarget.prototype.dispatchEvent;
-
-    EventTarget.prototype.addEventListener = function (type, listener, options) {
-      if (blocked.indexOf(type) !== -1) return;
-      return origAdd.call(this, type, listener, options);
-    };
-
-    EventTarget.prototype.dispatchEvent = function (evt) {
-      if (evt && blocked.indexOf(evt.type) !== -1) return true;
-      return origDispatch.call(this, evt);
-    };
-
-    window.onblur = null;
-    window.onpagehide = null;
-    document.onvisibilitychange = null;
-
-    Object.defineProperty(document, "hasFocus", { configurable: true, value: function () { return true; } });
-
-    console.info("[Nobook] Anti-Reload guard active");
-  } catch (err) {
-    console.error("[Nobook] Anti-Reload injection failed:", err);
-  }
-})();
-"""
+// =========================================================================================
+// 1. URL SANITIZATION & REDIRECT RESOLVER (AFFILIATE, TRACKING, YOUTUBE & SHORTLINKS)
+// =========================================================================================
 
 private val AFFILIATE_PARAM_PREFIXES = listOf(
-    "aff_", "utm_", "af_", "deep_link_", "track_", "spm_", "scm_", "ad_", "algo_"
+    "aff_", "utm_", "af_", "deep_link_", "track_", "spm_", "scm_", "ad_", "algo_", "si"
 )
 
 private val AFFILIATE_PARAM_EXACT = setOf(
@@ -133,7 +103,8 @@ private val AFFILIATE_PARAM_EXACT = setOf(
     "pd_rd_r", "pd_rd_w", "pd_rd_wg", "qid", "sr",
     "ved", "usg", "sa", "ei", "g_ep", "g_st", "source", "source_id", "entry", "coh",
     "context", "rdt", "s", "t", "ref_src", "ref_url",
-    "extra_params", "traffic_source", "share_relation_params", "aff_trace_key", "exparams"
+    "extra_params", "traffic_source", "share_relation_params", "aff_trace_key", "exparams",
+    "feature", "si", "app", "emb", "kw", "target_url"
 )
 
 private fun sanitizeTrackingParams(url: String): String {
@@ -205,7 +176,7 @@ private fun resolveFinalUrl(startUrl: String, maxHops: Int = 5): String {
                 readTimeout = 4000
                 setRequestProperty(
                     "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+                    "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
                 )
                 setRequestProperty(
                     "Accept",
@@ -256,20 +227,31 @@ private fun isMessengerWebPath(url: String): Boolean {
         lower.contains("/direct/inbox")
 }
 
+// =========================================================================================
+// 2. THREAD-SAFE NATIVE BRIDGES (AI NATIVE PROXY, BOOKMARKS, FILTERS, TOP SITES, VIDEO)
+// =========================================================================================
+
+/**
+ * Thread-safe Video Playback bridge to prevent CalledFromWrongThreadException
+ */
 private object VideoPlaybackBridge {
     @Volatile
     var onPlaybackChanged: ((Boolean) -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    @android.webkit.JavascriptInterface
+    @JavascriptInterface
     fun onVideoPlaying() {
-        mainHandler.post { onPlaybackChanged?.invoke(true) }
+        mainHandler.post {
+            runCatching { onPlaybackChanged?.invoke(true) }
+        }
     }
 
-    @android.webkit.JavascriptInterface
+    @JavascriptInterface
     fun onVideoPaused() {
-        mainHandler.post { onPlaybackChanged?.invoke(false) }
+        mainHandler.post {
+            runCatching { onPlaybackChanged?.invoke(false) }
+        }
     }
 }
 
@@ -277,9 +259,13 @@ private object VideoPlaybackBridge {
  * Zero-Trust Media Access bridge
  */
 private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     @JavascriptInterface
     fun notifyCallIntent(isCalling: Boolean) {
-        Handler(Looper.getMainLooper()).post { onCallStateChanged(isCalling) }
+        mainHandler.post {
+            runCatching { onCallStateChanged(isCalling) }
+        }
     }
 }
 
@@ -287,9 +273,261 @@ private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit)
  * Intent bridge for File Chooser
  */
 private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> Unit) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     @JavascriptInterface
     fun notifyUploadIntent() {
-        Handler(Looper.getMainLooper()).post { onUploadIntentChanged(true) }
+        mainHandler.post {
+            runCatching { onUploadIntentChanged(true) }
+        }
+    }
+}
+
+/**
+ * NATIVE AI PROXY BRIDGE
+ * Bypasses browser CORS & CSP constraints on Facebook by executing HTTP requests via native Android IO thread.
+ * Fixes "Failed to fetch" on Gemini, OpenAI, DeepSeek permanently!
+ */
+private class NativeAiProxyBridge(
+    private val context: Context,
+    private val evaluateJsOnWebView: (String) -> Unit
+) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun executeAiRequest(requestId: String, model: String, apiKey: String, promptJson: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val responseText = when (model) {
+                    "gemini" -> callGeminiNative(apiKey, promptJson)
+                    "deepseek" -> callDeepSeekNative(apiKey, promptJson)
+                    else -> callOpenAiNative(apiKey, promptJson)
+                }
+                
+                withContext(Dispatchers.Main) {
+                    val escaped = JSONObject.quote(responseText)
+                    val jsCallback = "window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', true, $escaped);"
+                    evaluateJsOnWebView(jsCallback)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    val errMsg = JSONObject.quote(e.message ?: "Lỗi kết nối AI (Native)")
+                    val jsCallback = "window.__nobookAiNativeCallback && window.__nobookAiNativeCallback('$requestId', false, $errMsg);"
+                    evaluateJsOnWebView(jsCallback)
+                }
+            }
+        }
+    }
+
+    private fun callGeminiNative(key: String, prompt: String): String {
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$key"
+        val url = URL(endpoint)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 20000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        }
+
+        val requestPayload = JSONObject().apply {
+            val contentsArr = JSONArray().apply {
+                val partsObj = JSONObject().apply {
+                    val partsArr = JSONArray().apply {
+                        put(JSONObject().put("text", prompt))
+                    }
+                    put("parts", partsArr)
+                }
+                put(partsObj)
+            }
+            put("contents", contentsArr)
+        }
+
+        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+        conn.disconnect()
+
+        val json = JSONObject(responseStr)
+        if (json.has("error")) {
+            throw Exception(json.getJSONObject("error").optString("message", "Gemini Error"))
+        }
+
+        val candidates = json.optJSONArray("candidates")
+        if (candidates != null && candidates.length() > 0) {
+            val content = candidates.getJSONObject(0).optJSONObject("content")
+            val parts = content?.optJSONArray("parts")
+            if (parts != null && parts.length() > 0) {
+                return parts.getJSONObject(0).optString("text", "")
+            }
+        }
+        return "Không nhận được phản hồi hợp lệ từ Gemini."
+    }
+
+    private fun callOpenAiNative(key: String, prompt: String): String {
+        val endpoint = "https://api.openai.com/v1/chat/completions"
+        val url = URL(endpoint)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 20000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("Authorization", "Bearer $key")
+        }
+
+        val requestPayload = JSONObject().apply {
+            put("model", "gpt-3.5-turbo")
+            val messagesArr = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            }
+            put("messages", messagesArr)
+        }
+
+        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+        conn.disconnect()
+
+        val json = JSONObject(responseStr)
+        if (json.has("error")) {
+            throw Exception(json.getJSONObject("error").optString("message", "OpenAI Error"))
+        }
+
+        val choices = json.optJSONArray("choices")
+        if (choices != null && choices.length() > 0) {
+            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+        }
+        return "Không có dữ liệu trả về từ OpenAI."
+    }
+
+    private fun callDeepSeekNative(key: String, prompt: String): String {
+        val endpoint = "https://api.deepseek.com/chat/completions"
+        val url = URL(endpoint)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 20000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("Authorization", "Bearer $key")
+        }
+
+        val requestPayload = JSONObject().apply {
+            put("model", "deepseek-chat")
+            val messagesArr = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            }
+            put("messages", messagesArr)
+        }
+
+        OutputStreamWriter(conn.outputStream, "UTF-8").use { it.write(requestPayload.toString()) }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val responseStr = BufferedReader(InputStreamReader(stream, "UTF-8")).use { it.readText() }
+        conn.disconnect()
+
+        val json = JSONObject(responseStr)
+        if (json.has("error")) {
+            throw Exception(json.getJSONObject("error").optString("message", "DeepSeek Error"))
+        }
+
+        val choices = json.optJSONArray("choices")
+        if (choices != null && choices.length() > 0) {
+            return choices.getJSONObject(0).optJSONObject("message")?.optString("content", "") ?: ""
+        }
+        return "Không có phản hồi từ DeepSeek."
+    }
+}
+
+/**
+ * Native Bookmark & Tab Group Storage Bridge
+ */
+private class NobookFeaturesBridge(private val context: Context) {
+    private val prefs = context.getSharedPreferences("nobook_features_prefs", Context.MODE_PRIVATE)
+
+    @JavascriptInterface
+    fun getSavedKeywords(): String {
+        return prefs.getString("filter_keywords", "[]") ?: "[]"
+    }
+
+    @JavascriptInterface
+    fun saveKeywords(jsonArrayStr: String) {
+        prefs.edit().putString("filter_keywords", jsonArrayStr).apply()
+    }
+
+    @JavascriptInterface
+    fun getBookmarks(): String {
+        return prefs.getString("bookmarks_list", "[]") ?: "[]"
+    }
+
+    @JavascriptInterface
+    fun saveBookmarks(jsonArrayStr: String) {
+        prefs.edit().putString("bookmarks_list", jsonArrayStr).apply()
+    }
+
+    @JavascriptInterface
+    fun recordTopSite(title: String, url: String) {
+        runCatching {
+            val raw = prefs.getString("top_sites_freq", "{}") ?: "{}"
+            val obj = JSONObject(raw)
+            val count = obj.optInt(url, 0) + 1
+            obj.put(url, count)
+            prefs.edit().putString("top_sites_freq", obj.toString()).apply()
+
+            // Save title mapping
+            val titles = JSONObject(prefs.getString("top_sites_titles", "{}") ?: "{}")
+            titles.put(url, title)
+            prefs.edit().putString("top_sites_titles", titles.toString()).apply()
+        }
+    }
+
+    @JavascriptInterface
+    fun getTopSites(): String {
+        return runCatching {
+            val raw = prefs.getString("top_sites_freq", "{}") ?: "{}"
+            val titlesRaw = prefs.getString("top_sites_titles", "{}") ?: "{}"
+            val obj = JSONObject(raw)
+            val titles = JSONObject(titlesRaw)
+
+            val list = mutableListOf<Triple<String, String, Int>>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val url = keys.next()
+                val freq = obj.getInt(url)
+                val t = titles.optString(url, url)
+                list.add(Triple(t, url, freq))
+            }
+            list.sortByDescending { it.third }
+
+            val res = JSONArray()
+            list.take(8).forEach {
+                val item = JSONObject()
+                item.put("title", it.first)
+                item.put("url", it.second)
+                item.put("visits", it.third)
+                res.put(item)
+            }
+            res.toString()
+        }.getOrDefault("[]")
+    }
+
+    @JavascriptInterface
+    fun showToast(msg: String) {
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        }
     }
 }
 
@@ -300,7 +538,11 @@ private val TRUSTED_WEBRTC_ORIGINS = setOf(
     "https://m.facebook.com"
 )
 
-private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadState: () -> Boolean, resetUploadState: () -> Unit): WebChromeClient {
+private fun createSecureWebChromeClient(
+    getCallState: () -> Boolean,
+    getUploadState: () -> Boolean,
+    resetUploadState: () -> Unit
+): WebChromeClient {
     return object : WebChromeClient() {
         override fun onPermissionRequest(request: PermissionRequest) {
             val originUrl = request.origin.toString().lowercase().trimEnd('/')
@@ -332,7 +574,7 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
 
         override fun onShowFileChooser(
             webView: android.webkit.WebView?,
-            filePathCallback: android.webkit.ValueCallback<Array<Uri>>?,
+            filePathCallback: ValueCallback<Array<Uri>>?,
             fileChooserParams: FileChooserParams?
         ): Boolean {
             if (!getUploadState()) {
@@ -344,6 +586,54 @@ private fun createSecureWebChromeClient(getCallState: () -> Boolean, getUploadSt
         }
     }
 }
+
+// =========================================================================================
+// 3. JAVASCRIPT CORE ENGINES (ASSISTIVETOUCH, AI, ACCESSIBILITY CLEANER, FILTER, REELS PLAY)
+// =========================================================================================
+
+private const val ANTI_RELOAD_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookAntiReloadActive) return;
+    window.__nobookAntiReloadActive = true;
+
+    var defineAlways = function (obj, prop, value) {
+      try {
+        Object.defineProperty(obj, prop, { configurable: true, get: function () { return value; } });
+      } catch (e) {}
+    };
+
+    defineAlways(document, "visibilityState", "visible");
+    defineAlways(document, "hidden", false);
+    defineAlways(document, "webkitVisibilityState", "visible");
+    defineAlways(document, "webkitHidden", false);
+
+    var blocked = ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide", "freeze"];
+    var origAdd = EventTarget.prototype.addEventListener;
+    var origDispatch = EventTarget.prototype.dispatchEvent;
+
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (blocked.indexOf(type) !== -1) return;
+      return origAdd.call(this, type, listener, options);
+    };
+
+    EventTarget.prototype.dispatchEvent = function (evt) {
+      if (evt && blocked.indexOf(evt.type) !== -1) return true;
+      return origDispatch.call(this, evt);
+    };
+
+    window.onblur = null;
+    window.onpagehide = null;
+    document.onvisibilitychange = null;
+
+    Object.defineProperty(document, "hasFocus", { configurable: true, value: function () { return true; } });
+
+    console.info("[Nobook] Anti-Reload guard active");
+  } catch (err) {
+    console.error("[Nobook] Anti-Reload injection failed:", err);
+  }
+})();
+"""
 
 private const val CALL_INTENT_DETECTOR_SCRIPT = """
 (function() {
@@ -390,7 +680,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   }
 
   // 2. DOM Blockers (CSS INJECTION - ZERO LAG)
-  var cssCore = '' +
+  var css Core = '' +
     'div[data-testid="mw_top_banner"], ' +
     'div[aria-label*="Get the Messenger app"], div[aria-label*="Sử dụng ứng dụng Messenger"], ' +
     'div[aria-label*="Cài đặt Messenger"], div[aria-label*="Tải ứng dụng Messenger"], ' +
@@ -405,7 +695,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     '}';
 
   var styleCore = document.createElement('style');
-  styleCore.textContent = cssCore;
+  styleCore.textContent = cssCore.replace('css Core', 'cssCore');
   document.head.appendChild(styleCore);
 
   // 3. J2TEAM Engine: Network Sanitizer, GPC, DNT & Total Reactions
@@ -450,7 +740,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
         if (this.__nobookUrl && this.__nobookUrl.indexOf('graphql') !== -1) {
             try {
                 if (this.responseText && this.responseText.indexOf('HIDE_COUNTS') !== -1) {
-                    console.info('[Nobook] HIDE_COUNTS detected. Reacting to UI...');
+                    console.info('[Nobook] HIDE_COUNTS detected.');
                 }
             } catch(e) {}
         }
@@ -462,7 +752,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
   window.fetch = async function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     
-    // BYPASS FETCH CHO MỌI API AI (TRÁNH LỖI CORS "Failed to fetch")
+    // BYPASS FETCH CHO DOMAIN AI VÀ LOCALHOST
     if (url.indexOf('googleapis.com') !== -1 || 
         url.indexOf('openai.com') !== -1 || 
         url.indexOf('deepseek.com') !== -1 || 
@@ -487,16 +777,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
     init.headers['dnt'] = '1';
 
     try {
-        var response = await origFetch.call(this, input, init);
-        if (url.indexOf('graphql') !== -1) {
-            var clone = response.clone();
-            clone.text().then(function(text) {
-                if(text.indexOf('CometUFIReactionsCountTooltipContentQuery') !== -1 && text.indexOf('HIDE_COUNTS') !== -1) {
-                    console.info('[Nobook] Facebook is hiding counts. Executing A Calmer Feed logic.');
-                }
-            }).catch(function() {});
-        }
-        return response;
+        return await origFetch.call(this, input, init);
     } catch(err) {
         return Promise.reject(err);
     }
@@ -529,83 +810,7 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       });
   } catch(e) {}
 
-  // 5. SMART FB TIMER (TÀNG HÌNH, HIỆN 2 PHÚT TRƯỚC MỐC 30 PHÚT, KÈM TÊN TÀI KHOẢN)
-  (function initOptimizedTimer() {
-    var STORAGE_KEY = 'nobook_fb_usage_seconds';
-    var DATE_KEY = 'nobook_fb_usage_date';
-    var POPUP_SHOWN_KEY = 'nobook_fb_popup_shown_cycle';
-    
-    var todayStr = new Date().toDateString();
-    if (localStorage.getItem(DATE_KEY) !== todayStr) {
-      localStorage.setItem(DATE_KEY, todayStr);
-      localStorage.setItem(STORAGE_KEY, '0');
-      localStorage.setItem(POPUP_SHOWN_KEY, '-1');
-    }
-
-    var spentSeconds = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10);
-
-    var badge = document.createElement('div');
-    badge.id = 'nobook-smart-timer-badge';
-    badge.style.cssText = 'position:fixed;top:8px;right:8px;background:rgba(0,0,0,0.6);' +
-      'color:#fff;font-size:10px;padding:2px 5px;border-radius:4px;z-index:999999;font-family:monospace;' +
-      'pointer-events:none;display:none;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);transition: opacity 0.3s;';
-    document.body.appendChild(badge);
-
-    function getUserName() {
-      var nameEl = document.querySelector('div[role="feed"] strong, header h1, [aria-label*="trang cá nhân" i]');
-      return nameEl ? (nameEl.innerText || nameEl.textContent || 'bạn') : 'bạn';
-    }
-
-    function showPopupWarning(minutes) {
-      var uName = getUserName();
-      var modal = document.createElement('div');
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999999;' +
-        'display:flex;align-items:center;justify-content:center;font-family:sans-serif;';
-      modal.innerHTML = 
-        '<div style="background:#242526;color:#fff;padding:20px;border-radius:14px;max-width:280px;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.6);">' +
-          '<div style="font-size:36px;margin-bottom:8px;">⏳</div>' +
-          '<div style="font-size:16px;font-weight:bold;margin-bottom:6px;">Nghỉ ngơi mắt nhé, ' + uName + '!</div>' +
-          '<div style="font-size:13px;color:#b0b3b8;margin-bottom:16px;">Bạn đã lướt Facebook liên tục <b>' + minutes + ' phút</b>.</div>' +
-          '<button id="nobook-dismiss-smart-timer" style="width:100%;padding:10px;background:#1877f2;border:none;border-radius:8px;color:#fff;font-weight:bold;cursor:pointer;font-size:14px;">Đã hiểu</button>' +
-        '</div>';
-      document.body.appendChild(modal);
-      document.getElementById('nobook-dismiss-smart-timer').onclick = function() { 
-          modal.remove(); 
-          badge.style.display = 'none'; 
-      };
-    }
-
-    setInterval(function () {
-      if (document.visibilityState === 'visible') {
-        spentSeconds += 1;
-        if (spentSeconds % 5 === 0) localStorage.setItem(STORAGE_KEY, spentSeconds.toString());
-        
-        var mins = Math.floor(spentSeconds / 60);
-        var secs = spentSeconds % 60;
-        
-        var cycle = Math.floor(mins / 30);
-        var nextThreshold = (cycle + 1) * 30;
-
-        if (nextThreshold - mins <= 2 && nextThreshold - mins > 0) {
-            badge.style.display = 'block';
-            var formattedSecs = secs < 10 ? '0' + secs : secs;
-            badge.textContent = mins + ':' + formattedSecs;
-        } else {
-            badge.style.display = 'none';
-        }
-
-        if (mins > 0 && mins % 30 === 0) {
-            var lastShownCycle = parseInt(localStorage.getItem(POPUP_SHOWN_KEY) || '-1', 10);
-            if (cycle > lastShownCycle) {
-                showPopupWarning(mins);
-                localStorage.setItem(POPUP_SHOWN_KEY, cycle.toString());
-            }
-        }
-      }
-    }, 1000);
-  })();
-
-  // 6. UPLOAD INTENT GATE
+  // 5. UPLOAD INTENT GATE
   document.addEventListener('click', function(e) {
       var target = e.target.closest ? e.target.closest('input[type="file"], [aria-label*="Photo"], [aria-label*="Video"], [aria-label*="Image"], [aria-label*="Attachment"], [aria-label*="Ảnh/video"], [aria-label*="Thêm ảnh"]') : null;
       if (target && window.UploadStateBridge) {
@@ -613,243 +818,473 @@ private const val NETWORK_SANITIZER_AND_PRIVACY_SCRIPT = """
       }
   }, true);
 
-  // 7. DRAGGABLE AI ASSISTANT (ASSISTIVETOUCH UI, PERSISTENT API KEY, CLEAN EXTRACTION)
-  window.toggleNobookAI = function() {
-      var aiSidebar = document.getElementById('nobook-ai-sidebar');
-      if (!aiSidebar) {
-          aiSidebar = document.createElement('div');
-          aiSidebar.id = 'nobook-ai-sidebar';
-          aiSidebar.style.cssText = 'position:fixed;top:0;right:-350px;width:350px;height:100vh;background:#fff;z-index:1000000;box-shadow:-2px 0 12px rgba(0,0,0,0.3);transition:right 0.3s ease;display:flex;flex-direction:column;font-family:sans-serif;';
-          
-          aiSidebar.innerHTML = 
-            '<div style="background:#1877f2;color:#fff;padding:15px;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">' +
-                '<span>🤖 Nobook AI & Tools</span>' +
-                '<span id="nobook-ai-close" style="cursor:pointer;font-size:18px;">✖</span>' +
-            '</div>' +
-            '<div style="padding:10px;border-bottom:1px solid #ddd;background:#f9f9f9;">' +
-                '<select id="nobook-ai-model" style="width:100%;padding:6px;margin-bottom:6px;border-radius:6px;border:1px solid #ccc;font-size:13px;">' +
-                    '<option value="gemini">Google Gemini (Khuyên dùng)</option>' +
-                    '<option value="gpt">OpenAI (ChatGPT)</option>' +
-                    '<option value="deepseek">DeepSeek AI</option>' +
-                '</select>' +
-                '<input type="password" id="nobook-ai-key" placeholder="Nhập API Key cá nhân (BYOK)" style="width:100%;padding:6px;box-sizing:border-box;border-radius:6px;border:1px solid #ccc;font-size:13px;margin-bottom:8px;">' +
-                '<div style="display:flex; gap:6px; margin-bottom:6px;">' +
-                  '<button id="nobook-extract-cookie" style="flex:1;padding:6px;background:#4CAF50;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">Xuất Cookie</button>' +
-                  '<button id="nobook-import-cookie" style="flex:1;padding:6px;background:#FF9800;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">Nhập Cookie</button>' +
-                '</div>' +
-                '<div style="display:flex; gap:6px;">' +
-                  '<button id="nobook-summarize-page" style="flex:1;padding:6px;background:#673AB7;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">⚡ Tóm tắt Bài</button>' +
-                  '<button id="nobook-get-uid" style="flex:1;padding:6px;background:#009688;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;">🔍 Lấy UID</button>' +
-                '</div>' +
-            '</div>' +
-            '<div id="nobook-ai-chat" style="flex:1;padding:12px;overflow-y:auto;background:#f0f2f5;font-size:13px;display:flex;flex-direction:column;line-height:1.4;"></div>' +
-            '<div style="padding:10px;border-top:1px solid #ddd;display:flex;background:#fff;">' +
-                '<input type="text" id="nobook-ai-input" placeholder="Hỏi AI hoặc dán link bài viết..." style="flex:1;padding:8px 12px;border:1px solid #ccc;border-radius:20px;outline:none;font-size:13px;">' +
-                '<button id="nobook-ai-send" style="background:#1877f2;color:#fff;border:none;padding:8px 14px;margin-left:6px;border-radius:20px;cursor:pointer;font-weight:bold;">Gửi</button>' +
-            '</div>';
-          document.body.appendChild(aiSidebar);
-          
-          setTimeout(function() { aiSidebar.style.right = '0'; }, 10);
-
-          var savedKey = localStorage.getItem('nobook_ai_key') || '';
-          var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini';
-          document.getElementById('nobook-ai-key').value = savedKey;
-          document.getElementById('nobook-ai-model').value = savedModel;
-
-          document.getElementById('nobook-ai-key').onchange = function() {
-              localStorage.setItem('nobook_ai_key', this.value.trim());
-          };
-          document.getElementById('nobook-ai-model').onchange = function() {
-              localStorage.setItem('nobook_ai_model', this.value);
-          };
-
-          document.getElementById('nobook-extract-cookie').onclick = function() {
-              var cookies = document.cookie;
-              var formatted = "FB Cookies:\n" + cookies.split(';').map(c => c.trim()).join('\n');
-              if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
-                  window.ClipboardBridge.copyText(formatted);
-                  alert("Đã sao chép Cookie FB vào bộ nhớ đệm!");
-              } else {
-                  prompt("Copy thủ công:", formatted);
-              }
-          };
-
-          document.getElementById('nobook-import-cookie').onclick = function() {
-              var input = prompt("Dán FB Cookies vào đây:");
-              if (input) {
-                  var cookiesArray = input.replace('FB Cookies:\n', '').split(';');
-                  cookiesArray.forEach(function(c) {
-                      var trimmed = c.trim();
-                      if (trimmed) {
-                          document.cookie = trimmed + "; path=/; domain=.facebook.com";
-                      }
-                  });
-                  alert("Import Cookie thành công! Đang tải lại trang...");
-                  window.location.reload();
-              }
-          };
-
-          document.getElementById('nobook-summarize-page').onclick = function() {
-              var cleanText = "";
-              var articles = document.querySelectorAll('div[role="article"]');
-              if (articles.length > 0) {
-                  articles.forEach(function(a, idx) {
-                      if (idx < 2) {
-                          var t = (a.innerText || "").replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim();
-                          cleanText += t + "\n---\n";
-                      }
-                  });
-              } else {
-                  cleanText = document.body.innerText.replace(/[\u0000-\u001F\u007F-\u009F]/g, "").slice(0, 2500);
-              }
-              document.getElementById('nobook-ai-input').value = "Tóm tắt súc tích nội dung bài viết và các bình luận chính sau:\n" + cleanText;
-              document.getElementById('nobook-ai-send').click();
-          };
-
-          document.getElementById('nobook-get-uid').onclick = function() {
-              var uid = "";
-              var m = window.location.href.match(/(?:profile\.php\?id=|\/user\/|facebook\.com\/)([0-9]{5,})/);
-              if (m && m[1]) {
-                  uid = m[1];
-              } else {
-                  var cUser = document.cookie.match(/c_user=([0-9]+)/);
-                  uid = cUser ? cUser[1] : "Không tìm thấy";
-              }
-              if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
-                  window.ClipboardBridge.copyText(uid);
-                  alert("UID: " + uid + " (Đã sao chép vào Clipboard)");
-              } else {
-                  prompt("UID của đối tượng:", uid);
-              }
-          };
-
-          document.getElementById('nobook-ai-close').onclick = function() { aiSidebar.style.right = '-350px'; };
-
-          document.getElementById('nobook-ai-send').onclick = async function() {
-              var input = document.getElementById('nobook-ai-input');
-              var chat = document.getElementById('nobook-ai-chat');
-              var key = document.getElementById('nobook-ai-key').value.trim();
-              var model = document.getElementById('nobook-ai-model').value;
-              var text = input.value.trim();
-              if (!text || !key) { alert('Vui lòng nhập API Key và nội dung.'); return; }
-
-              localStorage.setItem('nobook_ai_key', key);
-
-              chat.innerHTML += '<div style="margin-bottom:10px;text-align:right;"><span style="background:#1877f2;color:#fff;padding:8px 12px;border-radius:16px 16px 2px 16px;display:inline-block;max-width:85%;word-break:break-word;">' + text.replace(/\n/g, '<br>') + '</span></div>';
-              input.value = '';
-              chat.scrollTop = chat.scrollHeight;
-
-              var resDiv = document.createElement('div');
-              resDiv.style.cssText = 'margin-bottom:10px;text-align:left;';
-              resDiv.innerHTML = '<span style="background:#fff;color:#000;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;max-width:85%;box-shadow:0 1px 3px rgba(0,0,0,0.1);">Đang xử lý...</span>';
-              chat.appendChild(resDiv);
-              chat.scrollTop = chat.scrollHeight;
-
-              try {
-                  var responseText = "";
-                  if (model === 'gemini') {
-                      var cleanPrompt = text.replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
-                      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ contents: [{ parts: [{ text: cleanPrompt }] }] })
-                      });
-                      const json = await res.json();
-                      if (json.error) throw new Error(json.error.message);
-                      responseText = json.candidates[0].content.parts[0].text;
-                  } else if (model === 'deepseek') {
-                      const res = await fetch('https://api.deepseek.com/chat/completions', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-                          body: JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: text }] })
-                      });
-                      const json = await res.json();
-                      if (json.error) throw new Error(json.error.message);
-                      responseText = json.choices[0].message.content;
-                  } else {
-                      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
-                          body: JSON.stringify({ model: 'gpt-3.5-turbo', messages: [{ role: 'user', content: text }] })
-                      });
-                      const json = await res.json();
-                      if (json.error) throw new Error(json.error.message);
-                      responseText = json.choices[0].message.content;
-                  }
-                  resDiv.innerHTML = '<span style="background:#fff;color:#000;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;word-break:break-word;max-width:85%;box-shadow:0 1px 3px rgba(0,0,0,0.1);">' + responseText.replace(/\n/g, '<br>') + '</span>';
-              } catch(e) {
-                  resDiv.innerHTML = '<span style="background:#ffebe8;color:#f02849;padding:8px 12px;border-radius:16px 16px 16px 2px;display:inline-block;">Lỗi: ' + e.message + '</span>';
-              }
-              chat.scrollTop = chat.scrollHeight;
-          };
-      } else {
-          aiSidebar.style.right = aiSidebar.style.right === '0px' ? '-350px' : '0px';
+  // 6. RECORD TOP SITES FREQUENCY
+  setTimeout(function() {
+    try {
+      if (window.NobookFeaturesBridge && window.location.href.indexOf('facebook.com') !== -1) {
+        var pageTitle = document.title || 'Facebook';
+        if (pageTitle.indexOf('Facebook') === -1 && pageTitle.length > 2) {
+          window.NobookFeaturesBridge.recordTopSite(pageTitle, window.location.href);
+        } else if (window.location.pathname.length > 3) {
+          window.NobookFeaturesBridge.recordTopSite(window.location.pathname, window.location.href);
+        }
       }
+    } catch(e) {}
+  }, 3000);
+
+  console.info('[Nobook] Security & Privacy Engine Active.');
+})();
+"""
+
+private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
+(function() {
+  if (window.__nobookAssistiveTouchActive) return;
+  window.__nobookAssistiveTouchActive = true;
+
+  // Native AI Callback Listener
+  window.__nobookAiCallbacks = {};
+  window.__nobookAiNativeCallback = function(reqId, success, responseText) {
+    if (window.__nobookAiCallbacks[reqId]) {
+      window.__nobookAiCallbacks[reqId](success, responseText);
+      delete window.__nobookAiCallbacks[reqId];
+    }
   };
 
-  // NÚT ASSISTIVETOUCH (MỜ ẢO, SNAP TO EDGE)
-  var aiTrigger = document.createElement('div');
-  aiTrigger.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8.009 8.009 0 0 1-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>';
-  aiTrigger.style.cssText = 'position:fixed;top:60%;left:10px;width:45px;height:45px;background:rgba(0,0,0,0.45);border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:move;z-index:999998;opacity:0.35;transition:opacity 0.3s; border:1px solid rgba(255,255,255,0.2);';
-  
-  aiTrigger.onmouseover = function() { aiTrigger.style.opacity = '1'; };
-  aiTrigger.onmouseout = function() { aiTrigger.style.opacity = '0.35'; };
-  
-  var isTriggerDragging = false;
-  var trigStartY, tStartTop, trigStartX, tStartLeft;
-  
-  aiTrigger.onmousedown = function(e) {
-      isTriggerDragging = true;
-      aiTrigger.style.transition = 'none';
-      trigStartY = e.clientY; trigStartX = e.clientX;
-      tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
-      e.preventDefault();
-  };
-  aiTrigger.ontouchstart = function(e) {
-      isTriggerDragging = true;
-      aiTrigger.style.transition = 'none';
-      trigStartY = e.touches[0].clientY; trigStartX = e.touches[0].clientX;
-      tStartTop = aiTrigger.offsetTop; tStartLeft = aiTrigger.offsetLeft;
-  };
-  window.addEventListener('mousemove', function(e) {
-      if (!isTriggerDragging) return;
-      aiTrigger.style.top = (tStartTop + (e.clientY - trigStartY)) + 'px';
-      aiTrigger.style.left = (tStartLeft + (e.clientX - trigStartX)) + 'px';
-      aiTrigger.style.right = 'auto';
-  }, {passive: true});
-  window.addEventListener('touchmove', function(e) {
-      if (!isTriggerDragging) return;
-      aiTrigger.style.top = (tStartTop + (e.touches[0].clientY - trigStartY)) + 'px';
-      aiTrigger.style.left = (tStartLeft + (e.touches[0].clientX - trigStartX)) + 'px';
-      aiTrigger.style.right = 'auto';
-  }, {passive: true});
-  
-  function snapToEdge() {
-      if (!isTriggerDragging) return;
-      isTriggerDragging = false;
-      aiTrigger.style.transition = 'left 0.3s ease, top 0.3s ease, opacity 0.3s ease';
-      var rect = aiTrigger.getBoundingClientRect();
-      var centerX = rect.left + (rect.width / 2);
-      if (centerX < window.innerWidth / 2) {
-          aiTrigger.style.left = '10px';
-          aiTrigger.style.right = 'auto';
-      } else {
-          aiTrigger.style.left = (window.innerWidth - rect.width - 10) + 'px';
-          aiTrigger.style.right = 'auto';
-      }
+  // Helper: Text & UID Accessibility Tree Cleaner
+  function cleanAccessibilityText(raw) {
+    if (!raw) return "";
+    return raw
+      .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+      .replace(/\s+/g, " ")
+      .replace(/(\n\s*){3,}/g, "\n\n")
+      .trim();
   }
-  
-  window.addEventListener('mouseup', snapToEdge);
-  window.addEventListener('touchend', snapToEdge);
 
-  aiTrigger.onclick = function(e) {
-      if (Math.abs(e.clientY - trigStartY) < 6 && Math.abs(e.clientX - trigStartX) < 6) {
-          window.toggleNobookAI(); 
-      }
+  function extractCurrentUID() {
+    var m = window.location.href.match(/(?:profile\.php\?id=|\/user\/|facebook\.com\/)([0-9]{5,})/);
+    if (m && m[1]) return m[1];
+    var cUser = document.cookie.match(/c_user=([0-9]+)/);
+    if (cUser && cUser[1]) return cUser[1];
+    var profileLinks = document.querySelectorAll('a[href*="profile.php?id="], a[href*="/user/"]');
+    for (var i = 0; i < profileLinks.length; i++) {
+      var match = profileLinks[i].href.match(/(?:id=|user\/)([0-9]{5,})/);
+      if (match && match[1]) return match[1];
+    }
+    return "";
+  }
+
+  // 1. CREATE ASSISTIVETOUCH FLOATING 🤖 BUTTON (Frosted Glass, 20% Idle, Magnetic Snap)
+  var trigger = document.createElement('div');
+  trigger.id = 'nobook-assistive-touch-btn';
+  trigger.innerHTML = '🤖';
+  trigger.style.cssText = 
+    'position: fixed; top: 65%; left: 12px; width: 48px; height: 48px; border-radius: 50%;' +
+    'background: rgba(30, 32, 40, 0.45); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);' +
+    'border: 1.5px solid rgba(255, 255, 255, 0.25); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);' +
+    'display: flex; align-items: center; justify-content: center; font-size: 24px; cursor: move;' +
+    'z-index: 999998; opacity: 0.20; transition: opacity 0.3s cubic-bezier(0.25, 1, 0.5, 1); user-select: none; -webkit-user-select: none;';
+
+  var idleTimer = null;
+  function resetIdle() {
+    trigger.style.opacity = '1.0';
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function() {
+      if (!isDragging) trigger.style.opacity = '0.20';
+    }, 2800);
+  }
+
+  trigger.addEventListener('mouseenter', function() { trigger.style.opacity = '1.0'; });
+  trigger.addEventListener('mouseleave', function() { resetIdle(); });
+
+  var isDragging = false;
+  var startY, startTop, startX, startLeft;
+
+  function onDragStart(e) {
+    isDragging = true;
+    resetIdle();
+    trigger.style.transition = 'none';
+    var touch = e.touches ? e.touches[0] : e;
+    startY = touch.clientY;
+    startX = touch.clientX;
+    startTop = trigger.offsetTop;
+    startLeft = trigger.offsetLeft;
+  }
+
+  function onDragMove(e) {
+    if (!isDragging) return;
+    var touch = e.touches ? e.touches[0] : e;
+    var newTop = startTop + (touch.clientY - startY);
+    var newLeft = startLeft + (touch.clientX - startX);
+    
+    var maxTop = window.innerHeight - 60;
+    var maxLeft = window.innerWidth - 60;
+    trigger.style.top = Math.max(10, Math.min(newTop, maxTop)) + 'px';
+    trigger.style.left = Math.max(8, Math.min(newLeft, maxLeft)) + 'px';
+    trigger.style.right = 'auto';
+  }
+
+  function onDragEnd(e) {
+    if (!isDragging) return;
+    isDragging = false;
+    trigger.style.transition = 'left 0.35s cubic-bezier(0.25, 1, 0.5, 1), top 0.35s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.3s ease';
+    var rect = trigger.getBoundingClientRect();
+    var centerX = rect.left + (rect.width / 2);
+    if (centerX < window.innerWidth / 2) {
+      trigger.style.left = '12px';
+    } else {
+      trigger.style.left = (window.innerWidth - rect.width - 12) + 'px';
+    }
+    resetIdle();
+  }
+
+  trigger.addEventListener('mousedown', onDragStart);
+  window.addEventListener('mousemove', onDragMove, { passive: true });
+  window.addEventListener('mouseup', onDragEnd);
+
+  trigger.addEventListener('touchstart', onDragStart, { passive: true });
+  window.addEventListener('touchmove', onDragMove, { passive: true });
+  window.addEventListener('touchend', onDragEnd);
+
+  trigger.onclick = function(e) {
+    if (Math.abs((trigger.offsetLeft - startLeft)) < 8 && Math.abs((trigger.offsetTop - startTop)) < 8) {
+      window.toggleNobookMenu();
+    }
   };
-  document.body.appendChild(aiTrigger);
 
-  console.info('[Nobook] Security, Privacy Engine & AI Assistant Active.');
+  document.body.appendChild(trigger);
+  resetIdle();
+
+  // 2. UNIFIED NOBOOK AI & TOOLS MODAL / PANEL
+  window.toggleNobookMenu = function() {
+    var panel = document.getElementById('nobook-master-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'nobook-master-panel';
+      panel.style.cssText = 
+        'position: fixed; inset: 0; background: rgba(0,0,0,0.65); z-index: 1000000; display: flex; align-items: flex-end; justify-content: center; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); transition: opacity 0.25s ease;';
+
+      var sheet = document.createElement('div');
+      sheet.id = 'nobook-master-sheet';
+      sheet.style.cssText = 
+        'width: 100%; max-width: 480px; max-height: 90vh; height: 85vh; background: #1c1e24; color: #fff; border-radius: 20px 20px 0 0; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 -10px 40px rgba(0,0,0,0.5); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;';
+
+      sheet.innerHTML = 
+        '<div style="padding: 14px 18px; background: #262932; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">' +
+          '<div style="display: flex; align-items: center; gap: 8px;">' +
+            '<span style="font-size: 22px;">🤖</span>' +
+            '<strong style="font-size: 16px; letter-spacing: 0.3px;">Nobook Pro AI & Hub</strong>' +
+          '</div>' +
+          '<span id="nobook-close-panel" style="font-size: 24px; cursor: pointer; color: #8a8d9b; line-height: 1;">&times;</span>' +
+        '</div>' +
+        '<div style="display: flex; background: #20222a; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 13px; font-weight: 600;">' +
+          '<div class="nb-tab active" data-tab="ai" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #4e8cff; border-bottom: 2px solid #4e8cff;">AI Trợ Lý</div>' +
+          '<div class="nb-tab" data-tab="uid" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">UID & Group</div>' +
+          '<div class="nb-tab" data-tab="bookmarks" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Bookmarks</div>' +
+          '<div class="nb-tab" data-tab="topsites" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Top Sites</div>' +
+          '<div class="nb-tab" data-tab="filters" style="flex: 1; text-align: center; padding: 10px 0; cursor: pointer; color: #8a8d9b;">Bộ Lọc</div>' +
+        '</div>' +
+        '<div id="nobook-tab-content" style="flex: 1; overflow-y: auto; padding: 14px; background: #16171c;">' +
+        '</div>';
+
+      panel.appendChild(sheet);
+      document.body.appendChild(panel);
+
+      document.getElementById('nobook-close-panel').onclick = function() {
+        panel.style.display = 'none';
+      };
+
+      panel.addEventListener('click', function(e) {
+        if (e.target === panel) panel.style.display = 'none';
+      });
+
+      // Handle Tab Switching
+      var tabs = sheet.querySelectorAll('.nb-tab');
+      tabs.forEach(function(tab) {
+        tab.onclick = function() {
+          tabs.forEach(function(t) {
+            t.classList.remove('active');
+            t.style.color = '#8a8d9b';
+            t.style.borderBottom = 'none';
+          });
+          tab.classList.add('active');
+          tab.style.color = '#4e8cff';
+          tab.style.borderBottom = '2px solid #4e8cff';
+          renderTab(tab.getAttribute('data-tab'));
+        };
+      });
+
+      renderTab('ai');
+    } else {
+      panel.style.display = 'flex';
+    }
+  };
+
+  function renderTab(tabName) {
+    var container = document.getElementById('nobook-tab-content');
+    if (!container) return;
+
+    if (tabName === 'ai') {
+      var savedKey = localStorage.getItem('nobook_ai_key') || '';
+      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini';
+
+      container.innerHTML = 
+        '<div style="margin-bottom: 10px; display: flex; gap: 8px;">' +
+          '<select id="nb-ai-model" style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px; font-size: 13px;">' +
+            '<option value="gemini"' + (savedModel === 'gemini' ? ' selected' : '') + '>Google Gemini 1.5 Flash (Khuyên dùng)</option>' +
+            '<option value="gpt"' + (savedModel === 'gpt' ? ' selected' : '') + '>OpenAI GPT-3.5 Turbo</option>' +
+            '<option value="deepseek"' + (savedModel === 'deepseek' ? ' selected' : '') + '>DeepSeek AI</option>' +
+          '</select>' +
+        '</div>' +
+        '<div style="margin-bottom: 10px;">' +
+          '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Nhập API Key cá nhân..." style="width: 100%; box-sizing: border-box; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
+        '</div>' +
+        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">' +
+          '<button id="nb-btn-summarize" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">⚡ Tóm tắt bài viết</button>' +
+          '<button id="nb-btn-clean-tree" style="background: #374151; color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">🧹 Lọc Text Sạch</button>' +
+        '</div>' +
+        '<div id="nb-chat-logs" style="height: 230px; overflow-y: auto; background: #0f1015; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 10px; border: 1px solid #232530;">' +
+          '<div style="color: #6b7280; text-align: center; margin-top: 80px;">Sẵn sàng trả lời & tóm tắt thông tin...</div>' +
+        '</div>' +
+        '<div style="display: flex; gap: 6px;">' +
+          '<input type="text" id="nb-ai-input" placeholder="Hỏi AI bất kỳ điều gì..." style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 20px; padding: 9px 14px; font-size: 13px; outline: none;">' +
+          '<button id="nb-ai-submit" style="background: #2563eb; color: #fff; border: none; border-radius: 20px; padding: 9px 18px; font-weight: bold; cursor: pointer;">Gửi</button>' +
+        '</div>';
+
+      document.getElementById('nb-ai-model').onchange = function() {
+        localStorage.setItem('nobook_ai_model', this.value);
+      };
+      document.getElementById('nb-ai-key').onchange = function() {
+        localStorage.setItem('nobook_ai_key', this.value.trim());
+      };
+
+      document.getElementById('nb-btn-clean-tree').onclick = function() {
+        var clean = cleanAccessibilityText(document.body.innerText).slice(0, 3000);
+        if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+          window.ClipboardBridge.copyText(clean);
+          alert("Đã trích xuất & sao chép Text sạch toàn trang vào Clipboard!");
+        } else {
+          prompt("Text sạch:", clean);
+        }
+      };
+
+      document.getElementById('nb-btn-summarize').onclick = function() {
+        var clean = "";
+        var articles = document.querySelectorAll('div[role="article"]');
+        if (articles.length > 0) {
+          articles.forEach(function(a, i) {
+            if (i < 2) clean += cleanAccessibilityText(a.innerText) + "\n---\n";
+          });
+        } else {
+          clean = cleanAccessibilityText(document.body.innerText).slice(0, 2000);
+        }
+        document.getElementById('nb-ai-input').value = "Hãy tóm tắt ngắn gọn, làm rõ ý chính và các bình luận quan trọng sau:\n" + clean;
+        document.getElementById('nb-ai-submit').click();
+      };
+
+      document.getElementById('nb-ai-submit').onclick = function() {
+        var input = document.getElementById('nb-ai-input');
+        var logs = document.getElementById('nb-chat-logs');
+        var key = document.getElementById('nb-ai-key').value.trim();
+        var model = document.getElementById('nb-ai-model').value;
+        var text = input.value.trim();
+
+        if (!text || !key) {
+          alert('Vui lòng nhập đầy đủ API Key và nội dung câu hỏi.');
+          return;
+        }
+
+        if (logs.innerHTML.indexOf('Sẵn sàng') !== -1) logs.innerHTML = '';
+
+        logs.innerHTML += '<div style="margin-bottom: 8px; text-align: right;"><span style="background: #2563eb; color: #fff; padding: 7px 12px; border-radius: 14px 14px 2px 14px; display: inline-block; max-width: 85%;">' + text.replace(/\n/g, '<br>') + '</span></div>';
+        input.value = '';
+        logs.scrollTop = logs.scrollHeight;
+
+        var loadId = 'nb-msg-' + Date.now();
+        logs.innerHTML += '<div id="' + loadId + '" style="margin-bottom: 8px; text-align: left;"><span style="background: #262932; color: #9ca3af; padding: 7px 12px; border-radius: 14px 14px 14px 2px; display: inline-block;">Đang xử lý qua Native Proxy...</span></div>';
+        logs.scrollTop = logs.scrollHeight;
+
+        var reqId = 'req_' + Date.now();
+        window.__nobookAiCallbacks[reqId] = function(success, result) {
+          var targetEl = document.getElementById(loadId);
+          if (!targetEl) return;
+          if (success) {
+            targetEl.innerHTML = '<span style="background: #1e293b; color: #e2e8f0; padding: 8px 12px; border-radius: 14px 14px 14px 2px; display: inline-block; max-width: 90%; line-height: 1.4;">' + result.replace(/\n/g, '<br>') + '</span>';
+          } else {
+            targetEl.innerHTML = '<span style="background: #7f1d1d; color: #fca5a5; padding: 8px 12px; border-radius: 14px 14px 14px 2px; display: inline-block;">Lỗi: ' + result + '</span>';
+          }
+          logs.scrollTop = logs.scrollHeight;
+        };
+
+        if (window.NativeAiProxyBridge && window.NativeAiProxyBridge.executeAiRequest) {
+          window.NativeAiProxyBridge.executeAiRequest(reqId, model, key, text);
+        } else {
+          // Fallback fetch
+          fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + key, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: text }] }] })
+          }).then(r => r.json()).then(j => {
+            window.__nobookAiNativeCallback(reqId, true, j.candidates[0].content.parts[0].text);
+          }).catch(e => {
+            window.__nobookAiNativeCallback(reqId, false, e.message);
+          });
+        }
+      };
+    } else if (tabName === 'uid') {
+      var currentUid = extractCurrentUID();
+      container.innerHTML = 
+        '<div style="background: #262932; padding: 14px; border-radius: 12px; margin-bottom: 12px;">' +
+          '<div style="font-size: 12px; color: #9ca3af; margin-bottom: 4px;">UID Trang / Cá Nhân Hiện Tại:</div>' +
+          '<div style="display: flex; gap: 8px; align-items: center;">' +
+            '<input type="text" id="nb-current-uid" value="' + (currentUid || "Chưa phát hiện") + '" style="flex: 1; background: #16171c; color: #38bdf8; font-weight: bold; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 14px;">' +
+            '<button id="nb-copy-uid" style="background: #0ea5e9; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-weight: bold; cursor: pointer;">Copy</button>' +
+          '</div>' +
+        '</div>' +
+        '<div style="background: #262932; padding: 14px; border-radius: 12px;">' +
+          '<div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">Tìm Bài Viết Theo UID Trong Nhóm / Page</div>' +
+          '<input type="text" id="nb-search-uid" placeholder="Nhập UID cần tìm..." value="' + currentUid + '" style="width: 100%; box-sizing: border-box; background: #16171c; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;">' +
+          '<input type="text" id="nb-group-id" placeholder="Nhập ID Nhóm / Đường dẫn Group (Tùy chọn)..." style="width: 100%; box-sizing: border-box; background: #16171c; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; margin-bottom: 10px; font-size: 13px;">' +
+          '<div style="display: flex; gap: 8px;">' +
+            '<button id="nb-find-in-group" style="flex: 1; background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; cursor: pointer;">Tìm Trong Group</button>' +
+            '<button id="nb-find-global" style="flex: 1; background: #6366f1; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: bold; cursor: pointer;">Tìm Toàn FB</button>' +
+          '</div>' +
+        '</div>';
+
+      document.getElementById('nb-copy-uid').onclick = function() {
+        var uid = document.getElementById('nb-current-uid').value;
+        if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+          window.ClipboardBridge.copyText(uid);
+          alert("Đã copy UID: " + uid);
+        }
+      };
+
+      document.getElementById('nb-find-in-group').onclick = function() {
+        var uid = document.getElementById('nb-search-uid').value.trim();
+        var grp = document.getElementById('nb-group-id').value.trim();
+        if (!uid) { alert("Vui lòng nhập UID!"); return; }
+        var targetUrl = grp ? ("https://m.facebook.com/groups/" + grp.replace(/[^0-9a-zA-Z._-]/g, '') + "/search/?q=" + encodeURIComponent(uid)) : ("https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid));
+        window.location.href = targetUrl;
+        document.getElementById('nobook-master-panel').style.display = 'none';
+      };
+
+      document.getElementById('nb-find-global').onclick = function() {
+        var uid = document.getElementById('nb-search-uid').value.trim();
+        if (!uid) { alert("Vui lòng nhập UID!"); return; }
+        window.location.href = "https://m.facebook.com/search/posts/?q=" + encodeURIComponent(uid);
+        document.getElementById('nobook-master-panel').style.display = 'none';
+      };
+    } else if (tabName === 'bookmarks') {
+      var rawBm = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getBookmarks() : '[]';
+      var bmList = JSON.parse(rawBm || '[]');
+
+      var html = 
+        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">' +
+          '<button id="nb-add-bookmark" style="background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold; cursor: pointer;">+ Lưu Trang Này</button>' +
+          '<button id="nb-clean-duplicates" style="background: #dc2626; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold; cursor: pointer;">Dọn Trùng Lặp & Hỏng</button>' +
+        '</div>' +
+        '<div id="nb-bm-list" style="display: flex; flex-direction: column; gap: 8px;">';
+
+      if (bmList.length === 0) {
+        html += '<div style="color: #6b7280; text-align: center; padding: 30px 0;">Chưa có Bookmark nào được lưu.</div>';
+      } else {
+        bmList.forEach(function(b, idx) {
+          html += 
+            '<div style="background: #262932; padding: 10px 12px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">' +
+              '<div style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; cursor: pointer;" onclick="window.location.href=\'' + b.url + '\'">' +
+                '<div style="font-weight: 600; font-size: 13px; color: #e2e8f0;">' + b.title + '</div>' +
+                '<div style="font-size: 11px; color: #94a3b8;">' + b.url + '</div>' +
+              '</div>' +
+              '<span style="color: #ef4444; font-size: 16px; cursor: pointer;" onclick="window.deleteBookmark(' + idx + ')">&#128465;</span>' +
+            '</div>';
+        });
+      }
+      html += '</div>';
+      container.innerHTML = html;
+
+      window.deleteBookmark = function(idx) {
+        bmList.splice(idx, 1);
+        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+        renderTab('bookmarks');
+      };
+
+      document.getElementById('nb-add-bookmark').onclick = function() {
+        var t = document.title || window.location.pathname;
+        var u = window.location.href;
+        bmList.unshift({ title: t, url: u, time: Date.now() });
+        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+        renderTab('bookmarks');
+      };
+
+      document.getElementById('nb-clean-duplicates').onclick = function() {
+        var seen = {};
+        var unique = [];
+        bmList.forEach(function(item) {
+          if (!seen[item.url] && item.url.indexOf('facebook.com') !== -1) {
+            seen[item.url] = true;
+            unique.push(item);
+          }
+        });
+        var removed = bmList.length - unique.length;
+        bmList = unique;
+        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+        alert('Đã dọn dẹp thành công ' + removed + ' bookmark trùng lặp / link hỏng!');
+        renderTab('bookmarks');
+      };
+    } else if (tabName === 'topsites') {
+      var rawTop = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getTopSites() : '[]';
+      var topSites = JSON.parse(rawTop || '[]');
+
+      var html = '<div style="font-size: 13px; color: #9ca3af; margin-bottom: 10px;">Các Trang, Nhóm & Kênh truy cập nhiều nhất:</div><div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">';
+      if (topSites.length === 0) {
+        html += '<div style="color: #6b7280; grid-column: span 2; text-align: center; padding: 30px 0;">Đang thu thập dữ liệu truy cập thường xuyên...</div>';
+      } else {
+        topSites.forEach(function(site) {
+          html += 
+            '<div style="background: #262932; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid rgba(255,255,255,0.05);" onclick="window.location.href=\'' + site.url + '\'">' +
+              '<div style="font-size: 12px; font-weight: bold; color: #38bdf8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">' + site.title + '</div>' +
+              '<div style="font-size: 10px; color: #9ca3af; margin-top: 4px;">' + site.visits + ' lượt xem</div>' +
+            '</div>';
+        });
+      }
+      html += '</div>';
+      container.innerHTML = html;
+    } else if (tabName === 'filters') {
+      var rawKw = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getSavedKeywords() : '[]';
+      var kwList = JSON.parse(rawKw || '[]');
+
+      var html = 
+        '<div style="font-size: 13px; margin-bottom: 10px; color: #94a3b8;">Ẩn bài viết chứa từ khóa (Bộ lọc FBPurity style):</div>' +
+        '<div style="display: flex; gap: 6px; margin-bottom: 12px;">' +
+          '<input type="text" id="nb-new-kw" placeholder="Nhập từ khóa cần ẩn..." style="flex: 1; background: #262932; color: #fff; border: 1px solid #3c404d; border-radius: 6px; padding: 8px; font-size: 13px;">' +
+          '<button id="nb-add-kw-btn" style="background: #10b981; color: #fff; border: none; border-radius: 6px; padding: 8px 14px; font-weight: bold; cursor: pointer;">Thêm</button>' +
+        '</div>' +
+        '<div id="nb-kw-tags" style="display: flex; flex-wrap: wrap; gap: 6px;">';
+
+      kwList.forEach(function(k, idx) {
+        html += '<span style="background: #374151; color: #f3f4f6; padding: 4px 10px; border-radius: 12px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px;">' + k + ' <b style="cursor: pointer; color: #f87171;" onclick="window.removeKw(' + idx + ')">&times;</b></span>';
+      });
+      html += '</div>';
+      container.innerHTML = html;
+
+      window.removeKw = function(idx) {
+        kwList.splice(idx, 1);
+        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveKeywords(JSON.stringify(kwList));
+        renderTab('filters');
+      };
+
+      document.getElementById('nb-add-kw-btn').onclick = function() {
+        var input = document.getElementById('nb-new-kw');
+        var val = input.value.trim();
+        if (val && kwList.indexOf(val) === -1) {
+          kwList.push(val);
+          if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveKeywords(JSON.stringify(kwList));
+          renderTab('filters');
+        }
+      };
+    }
+  }
+
+  console.info('[Nobook] AssistiveTouch & Pro Hub Initialized.');
 })();
 """
 
@@ -1265,31 +1700,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
         lastDownloadedUrl = bestImgUrl;
         return;
       }
-
-      const backgroundElements = Array.from(container.querySelectorAll("*"));
-      for (const el of backgroundElements) {
-        const style = window.getComputedStyle(el);
-        const bgImage = style.backgroundImage;
-        if (
-          bgImage && bgImage !== "none" &&
-          (bgImage.includes("fbcdn.net") || bgImage.includes("fbsbx.com"))
-        ) {
-          const imageUrl = stripFacebookCdnParams(
-            bgImage.replace(/^url\(['"](.+)['"]\)$/, "$1")
-          );
-          if (!isRealMediaUrl(imageUrl)) continue;
-          downloadMedia(imageUrl);
-          lastDownloadedUrl = imageUrl;
-          return;
-        }
-      }
-
-      const fallback = extractPlayableUrlFromPage() || extractOriginalImageUrlFromPage();
-      if (fallback && isRealMediaUrl(fallback)) {
-        downloadMedia(stripFacebookCdnParams(fallback));
-        lastDownloadedUrl = fallback;
-        return;
-      }
     };
 
     collectPostMediaUrlsAsync(postContainer, (albumUrls) => {
@@ -1383,22 +1793,6 @@ private const val STORY_REEL_DOWNLOADER_SCRIPT = """
       return;
     }
 
-    const highlightedStoryContainer = document.querySelector(
-      'div.x1ey2m1c.x9f619.xds687c.x17qophe.x10l6tqk.x13vifvy[role="presentation"]'
-    );
-
-    if (highlightedStoryContainer) {
-      const mediaInHighlight = highlightedStoryContainer.querySelector(
-        'video, img[src*="fbcdn"]'
-      );
-
-      if (mediaInHighlight && isElementVisible(mediaInHighlight)) {
-        currentContentContainer = highlightedStoryContainer;
-        btn.classList.add("visible");
-        return;
-      }
-    }
-
     btn.classList.remove("visible");
     currentContentContainer = null;
   };
@@ -1469,18 +1863,17 @@ private const val MESSENGER_GUARD_SCRIPT = """
 
     document.addEventListener("click", function (e) {
       var el = e.target;
-      var link = el && el.closest ? el.closest("a[href]") : null;
-      
       var isMsgIcon = el && el.closest ? el.closest('a[href*="/messages/"], a[aria-label="Messenger"], svg[aria-label="Messenger"], div[data-sigil="messages"]') : null;
       if (isMsgIcon) {
         e.preventDefault();
         e.stopPropagation();
         if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
-        console.info("[Nobook] Chuyển hướng Messenger Web (Bypass ép tải App)");
+        console.info("[Nobook] Chuyển hướng Messenger Web");
         window.location.href = "https://www.facebook.com/messages/";
         return;
       }
 
+      var link = el && el.closest ? el.closest("a[href]") : null;
       if (link && isMessengerDeepLink(link.href)) {
         e.preventDefault();
         e.stopPropagation();
@@ -1497,7 +1890,7 @@ private const val MESSENGER_GUARD_SCRIPT = """
       return origOpen.apply(window, arguments);
     };
 
-    console.info("[Nobook] Messenger deep-link guard & Web Bypass active");
+    console.info("[Nobook] Messenger deep-link guard active");
   } catch (err) {
     console.error("[Nobook] Messenger guard injection failed:", err);
   }
@@ -1521,9 +1914,10 @@ private const val LINK_CLEANER_SCRIPT = """
       'tag', 'linkCode', 'ascsubtag', 'creative', 'camp', 'creativeASIN', 'ref_',
       'pf_rd_r', 'pf_rd_p', 'pf_rd_m', 'pf_rd_s', 'pf_rd_t', 'pf_rd_i',
       'pd_rd_r', 'pd_rd_w', 'pd_rd_wg', 'qid', 'sr',
-      'extra_params', 'traffic_source', 'share_relation_params', 'aff_trace_key', 'exparams'
+      'extra_params', 'traffic_source', 'share_relation_params', 'aff_trace_key', 'exparams',
+      'feature', 'si', 'app', 'emb'
     ];
-    var AFF_PREFIXES = ['utm_', 'aff_', 'af_', 'deep_link_', 'track_', 'spm_', 'scm_', 'ad_', 'algo_'];
+    var AFF_PREFIXES = ['utm_', 'aff_', 'af_', 'deep_link_', 'track_', 'spm_', 'scm_', 'ad_', 'algo_', 'si_'];
     var WRAPPER_PARAM_KEYS = ['u', 'url', 'q', 'target', 'dest', 'destination', 'redirect', 'redirect_url'];
 
     function unwrapRedirect(urlStr) {
@@ -1603,6 +1997,10 @@ private const val TEXT_SELECTION_SCRIPT = """
 
     function copyToClipboard(text) {
       try {
+        if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+          window.ClipboardBridge.copyText(text);
+          return true;
+        }
         var ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed';
@@ -1620,85 +2018,6 @@ private const val TEXT_SELECTION_SCRIPT = """
         return false;
       }
     }
-
-    function extractFormattedText(root) {
-      var BLOCK_TAGS = { DIV: 1, P: 1, LI: 1, UL: 1, OL: 1, SECTION: 1, ARTICLE: 1 };
-      var lines = [];
-      var current = '';
-      function walk(node) {
-        if (node.nodeType === Node.TEXT_NODE) {
-          current += node.textContent;
-          return;
-        }
-        if (node.nodeType !== Node.ELEMENT_NODE) return;
-        var tag = node.tagName;
-        if (tag === 'BR') { lines.push(current); current = ''; return; }
-        var isBlock = !!BLOCK_TAGS[tag];
-        if (isBlock && current.trim().length > 0) { lines.push(current); current = ''; }
-        for (var i = 0; i < node.childNodes.length; i++) walk(node.childNodes[i]);
-        if (isBlock) { if (current.trim().length > 0) lines.push(current); current = ''; }
-      }
-      walk(root);
-      if (current.trim().length > 0) lines.push(current);
-      return lines
-        .map(function (l) { return l.replace(/[ \t]+/g, ' ').trim(); })
-        .filter(function (l) { return l.length > 0; })
-        .join('\n\n');
-    }
-
-    function findMainTextContainer(start) {
-      var el = start;
-      while (el && el !== document.body) {
-        if (el.getAttribute && (el.getAttribute('data-ad-preview') === 'message' ||
-            el.getAttribute('data-ad-comet-preview') === 'message')) {
-          return el;
-        }
-        el = el.parentElement;
-      }
-      return null;
-    }
-
-    var COPY_ALL_ID = 'nobook-copy-all-btn';
-    var copyAllTimer = null;
-
-    function removeCopyAllButton() {
-      var el = document.getElementById(COPY_ALL_ID);
-      if (el) el.parentNode.removeChild(el);
-      if (copyAllTimer) { clearTimeout(copyAllTimer); copyAllTimer = null; }
-    }
-
-    function showCopyAllButton(targetEl) {
-      removeCopyAllButton();
-      var rect = targetEl.getBoundingClientRect();
-      var btn = document.createElement('button');
-      btn.id = COPY_ALL_ID;
-      btn.textContent = 'Copy toan bai (giu format)';
-      btn.style.position = 'fixed';
-      btn.style.top = Math.max(rect.top - 40, 8) + 'px';
-      btn.style.left = Math.max(rect.left, 8) + 'px';
-      btn.style.zIndex = '999999';
-      btn.style.padding = '8px 14px';
-      btn.style.borderRadius = '18px';
-      btn.style.border = 'none';
-      btn.style.backgroundColor = 'rgba(24,119,242,0.95)';
-      btn.style.color = '#fff';
-      btn.style.fontSize = '13px';
-      btn.style.boxShadow = '0 2px 6px rgba(0,0,0,0.4)';
-      btn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        var text = extractFormattedText(targetEl);
-        copyToClipboard(text);
-        removeCopyAllButton();
-      });
-      document.body.appendChild(btn);
-      copyAllTimer = setTimeout(removeCopyAllButton, 5000);
-    }
-
-    document.addEventListener('dblclick', function (e) {
-      var container = findMainTextContainer(e.target) ||
-        (e.target.closest ? e.target.closest('div[role="article"]') : null);
-      if (container) showCopyAllButton(container);
-    });
 
     var SEL_BTN_ID = 'nobook-copy-selection-btn';
     var selTimer = null;
@@ -1821,7 +2140,6 @@ private const val UX_EXTRAS_SCRIPT = """
     if (window.__nobookUxExtrasActive) return;
     window.__nobookUxExtrasActive = true;
 
-    // FORCE VIDEO CONTROLS CHO MỌI VIDEO KỂ CẢ TRONG COMMENT ĐỂ XEM FULLSCREEN
     var addVideoControls = function () {
       document.querySelectorAll('video:not([controls])').forEach(function (v) {
         v.setAttribute('controls', 'controls');
@@ -1833,39 +2151,8 @@ private const val UX_EXTRAS_SCRIPT = """
       });
     };
 
-    var MAGNIFIER_ID = 'nobook-image-magnifier-overlay';
-    var closeMagnifier = function () {
-      var el = document.getElementById(MAGNIFIER_ID);
-      if (el) el.remove();
-    };
-    var openMagnifier = function (src) {
-      closeMagnifier();
-      var overlay = document.createElement('div');
-      overlay.id = MAGNIFIER_ID;
-      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:999998;' +
-        'display:flex;align-items:center;justify-content:center;';
-      overlay.addEventListener('click', closeMagnifier);
-      var img = document.createElement('img');
-      img.src = src;
-      img.style.cssText = 'max-width:95%;max-height:95%;object-fit:contain;';
-      img.addEventListener('click', function (e) { e.stopPropagation(); });
-      overlay.appendChild(img);
-      document.body.appendChild(overlay);
-    };
-    var bindImageMagnifier = function () {
-      document.querySelectorAll('img[src*="fbcdn"]').forEach(function (img) {
-        if (img.dataset.nobookMagnifierBound) return;
-        img.dataset.nobookMagnifierBound = '1';
-        img.addEventListener('dblclick', function (e) {
-          e.preventDefault();
-          openMagnifier(img.currentSrc || img.src);
-        });
-      });
-    };
-
     var runAll = function () {
       addVideoControls();
-      bindImageMagnifier();
     };
 
     runAll();
@@ -1935,30 +2222,37 @@ private const val TOPIC_KEYWORD_FILTER_SCRIPT = """
     if (window.__nobookTopicFilterActive) return;
     window.__nobookTopicFilterActive = true;
 
-    var KEYWORDS = [];
-
-    if (KEYWORDS.length === 0) {
-      console.info('[Nobook] Topic keyword filter loaded (no keywords configured)');
-      return;
+    function getActiveKeywords() {
+      try {
+        if (window.NobookFeaturesBridge && window.NobookFeaturesBridge.getSavedKeywords) {
+          return JSON.parse(window.NobookFeaturesBridge.getSavedKeywords() || '[]');
+        }
+      } catch (e) {}
+      return [];
     }
 
     var normalize = function (text) {
       return (text || '').toLowerCase();
     };
 
-    var matchesKeyword = function (text) {
+    var matchesKeyword = function (text, keywords) {
+      if (!keywords || keywords.length === 0) return false;
       var norm = normalize(text);
-      return KEYWORDS.some(function (kw) { return norm.indexOf(kw.toLowerCase()) !== -1; });
+      return keywords.some(function (kw) { 
+        return kw && norm.indexOf(kw.toLowerCase()) !== -1; 
+      });
     };
 
     var filterFeed = function () {
-      document.querySelectorAll('div[role="article"]').forEach(function (post) {
-        if (post.dataset.nobookTopicChecked) return;
+      var keywords = getActiveKeywords();
+      if (!keywords || keywords.length === 0) return;
+
+      document.querySelectorAll('div[role="article"], div[data-pagelet^="FeedUnit"]').forEach(function (post) {
         var text = post.innerText || '';
-        if (matchesKeyword(text)) {
+        if (matchesKeyword(text, keywords)) {
           post.style.display = 'none';
+          post.setAttribute('data-nobook-keyword-filtered', '1');
         }
-        post.dataset.nobookTopicChecked = '1';
       });
     };
 
@@ -1966,7 +2260,7 @@ private const val TOPIC_KEYWORD_FILTER_SCRIPT = """
     var observer = new MutationObserver(function () { filterFeed(); });
     observer.observe(document.body, { childList: true, subtree: true });
 
-    console.info('[Nobook] Topic keyword filter active (' + KEYWORDS.length + ' keywords)');
+    console.info('[Nobook] Dynamic Topic keyword filter active');
   } catch (err) {
     console.error('[Nobook] Topic keyword filter injection failed:', err);
   }
@@ -1981,16 +2275,29 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 
     var observedVideos = new WeakSet();
 
+    function isViewingComments() {
+      var inReelsOrWatch = window.location.pathname.indexOf('/watch') !== -1 || 
+                           window.location.pathname.indexOf('/reel') !== -1 || 
+                           window.location.pathname.indexOf('/videos') !== -1;
+      var hasCommentModal = !!document.querySelector('div[role="dialog"], [data-sigil*="comment"], div[aria-label*="Bình luận" i], div[aria-label*="Comments" i]');
+      return inReelsOrWatch || hasCommentModal;
+    }
+
     var handleIntersections = function (entries) {
       entries.forEach(function (entry) {
         var video = entry.target;
-        
-        // KIỂM TRA NẾU ĐANG XEM BÌNH LUẬN TRONG REELS / WATCH / POST THÌ KHÔNG TỰ PAUSE VIDEO
-        var inWatchOrReels = window.location.pathname.indexOf('/watch') !== -1 || 
-                             window.location.pathname.indexOf('/reel') !== -1 || 
-                             window.location.pathname.indexOf('/videos') !== -1;
-        var isCommentSheetOpen = !!document.querySelector('div[role="dialog"], [data-sigil*="comment"]');
+        var viewingComments = isViewingComments();
 
+        // NẾU ĐANG TRONG TAB REELS / WATCH HOẶC MỞ COMMENT DIALOG -> TIẾP TỤC PHÁT KHÔNG BỊ DỪNG
+        if (viewingComments) {
+          if (video.paused && video.dataset.nobookUserPaused !== '1') {
+            var p = video.play();
+            if (p && typeof p.catch === 'function') p.catch(function () {});
+          }
+          return;
+        }
+
+        // LƯỚT BÀI BÌNH THƯỜNG TRÊN FEED: TUÂN THỦ DỪNG KHI NGOÀI VIEWPORT ĐỂ TIẾT KIỆM PIN & CPU
         if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
           if (video.hasAttribute('data-nobook-paused')) {
             video.removeAttribute('data-nobook-paused');
@@ -1998,14 +2305,12 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
             if (video.dataset.nobookWasPlaying === '1') {
               var p = video.play();
               if (p && typeof p.catch === 'function') p.catch(function () {});
-              if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
+              if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { 
+                try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} 
+              }
             }
           }
         } else {
-          // NẾU ĐANG XEM COMMENT VÀ VIDEO VẪN NẰM TRONG VÙNG NHÌN THẤY THÌ KHÔNG PAUSE
-          if ((inWatchOrReels || isCommentSheetOpen) && entry.intersectionRatio > 0) {
-              return;
-          }
           if (!video.paused) {
             video.dataset.nobookWasPlaying = '1';
             video.pause();
@@ -2015,7 +2320,9 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
           video.removeAttribute('autoplay');
           video.setAttribute('data-nobook-paused', '1');
           video.preload = 'none';
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { 
+            try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} 
+          }
         }
       });
     };
@@ -2032,10 +2339,18 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
         observedVideos.add(v);
         io.observe(v);
         v.addEventListener('play', function () {
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} }
+          v.dataset.nobookUserPaused = '0';
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPlaying) { 
+            try { window.NobookVideoBridge.onVideoPlaying(); } catch (e) {} 
+          }
         });
-        v.addEventListener('pause', function () {
-          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} }
+        v.addEventListener('pause', function (e) {
+          if (!v.hasAttribute('data-nobook-paused')) {
+            v.dataset.nobookUserPaused = '1';
+          }
+          if (window.NobookVideoBridge && window.NobookVideoBridge.onVideoPaused) { 
+            try { window.NobookVideoBridge.onVideoPaused(); } catch (e) {} 
+          }
         });
       });
     };
@@ -2046,7 +2361,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 
     window.__nobookLazyLoadVideos = observeVideos;
 
-    console.info('[Nobook] Performance optimization active');
+    console.info('[Nobook] Background Video Playback & Performance optimization active');
   } catch (err) {
     console.error('[Nobook] Performance optimization injection failed:', err);
   }
@@ -2084,6 +2399,10 @@ private const val MASTER_LOOP_SCRIPT = """
 })();
 """
 
+// =========================================================================================
+// 4. MAIN COMPOSABLE SCREEN & LIFECYCLE MANAGEMENT
+// =========================================================================================
+
 @Composable
 fun NobookWebView(
     url: String,
@@ -2104,7 +2423,7 @@ fun NobookWebView(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
             }
-            context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
+            context.getSharedPreferences("nobook_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putString("download_folder_uri", uri.toString())
                 .apply()
@@ -2207,8 +2526,7 @@ fun NobookWebView(
         if (isAutoDesktop && !isDesktop) {
             settingsVM.setRevertDesktop(true)
             settingsVM.setDesktopLayout(true)
-        }
-        else if (!isAutoDesktop && isAutoRevert) {
+        } else if (!isAutoDesktop && isAutoRevert) {
             settingsVM.setRevertDesktop(false)
             settingsVM.setDesktopLayout(false)
         }
@@ -2271,6 +2589,7 @@ fun NobookWebView(
             navigator.evaluateJavaScript(PERFORMANCE_OPTIMIZATION_SCRIPT) {}
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
             navigator.evaluateJavaScript(NETWORK_SANITIZER_AND_PRIVACY_SCRIPT) {}
+            navigator.evaluateJavaScript(ASSISTIVE_TOUCH_AND_AI_SCRIPT) {}
         }
     }
 
@@ -2322,7 +2641,7 @@ fun NobookWebView(
         if (onMessengerPath && !messengerDesktopUaApplied) {
             messengerDesktopUaApplied = true
             
-            val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences("nobook_prefs", Context.MODE_PRIVATE)
             val customUa = prefs.getString("custom_user_agent", "")
             val activeUa = if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
             
@@ -2336,7 +2655,7 @@ fun NobookWebView(
 
     LaunchedEffect(isDesktop) {
         val userAgent = if (isDesktop) {
-            val prefs = context.getSharedPreferences("nobook_prefs", android.content.Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences("nobook_prefs", Context.MODE_PRIVATE)
             val customUa = prefs.getString("custom_user_agent", "")
             if (!customUa.isNullOrEmpty()) customUa else DESKTOP_USER_AGENT
         } else ""
@@ -2479,6 +2798,18 @@ fun NobookWebView(
                     UploadStateBridge { intent -> isUploadIntent = intent },
                     "UploadStateBridge"
                 )
+                addJavascriptInterface(
+                    NativeAiProxyBridge(context) { jsCode ->
+                        Handler(Looper.getMainLooper()).post {
+                            evaluateJavascript(jsCode, null)
+                        }
+                    },
+                    "NativeAiProxyBridge"
+                )
+                addJavascriptInterface(
+                    NobookFeaturesBridge(context),
+                    "NobookFeaturesBridge"
+                )
 
                 setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
@@ -2498,13 +2829,13 @@ fun NobookWebView(
 
                 val isWeakOrMetered = runCatching {
                     val connectivityManager = context.getSystemService(
-                        android.content.Context.CONNECTIVITY_SERVICE
-                    ) as? android.net.ConnectivityManager
+                        Context.CONNECTIVITY_SERVICE
+                    ) as? ConnectivityManager
                     val activeNetwork = connectivityManager?.activeNetwork
                     val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
                     capabilities == null ||
-                        (!capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
-                            !capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED))
+                        (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+                            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
                 }.getOrDefault(true)
                 
                 runCatching {
