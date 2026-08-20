@@ -70,6 +70,7 @@ import com.ycngmn.nobook.utils.rememberAutoDesktop
 import com.ycngmn.nobook.utils.rememberImeHeight
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -301,7 +302,6 @@ private class NativeAiProxyBridge(
     private val context: Context,
     private val evaluateJsOnWebView: (String) -> Unit
 ) {
-    private val mainHandler = Handler(Looper.getMainLooper())
     private val keyIndexCounter = AtomicInteger(0)
 
     private fun parseApiKeys(rawKeyInput: String): List<String> {
@@ -369,8 +369,8 @@ private class NativeAiProxyBridge(
         val modelCandidates = mutableListOf<String>()
         modelCandidates.add(initialModel)
         
-        // Thêm các model fallback phổ biến mới nhất
-        val fallbacks = listOf("gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro")
+        // Chuỗi fallback model Gemini thông minh
+        val fallbacks = listOf("gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash")
         fallbacks.forEach { if (!modelCandidates.contains(it)) modelCandidates.add(it) }
 
         var lastEx: Exception? = null
@@ -380,8 +380,7 @@ private class NativeAiProxyBridge(
             } catch (e: Exception) {
                 lastEx = e
                 val msg = e.message ?: ""
-                // Nếu model bị 404 hoặc deprecated thì thử model tiếp theo
-                if (msg.contains("not found", true) || msg.contains("no longer available", true) || msg.contains("deprecated", true)) {
+                if (msg.contains("not found", true) || msg.contains("no longer available", true) || msg.contains("deprecated", true) || msg.contains("is not supported", true)) {
                     continue
                 } else {
                     throw e
@@ -394,7 +393,7 @@ private class NativeAiProxyBridge(
     private fun callGeminiNative(modelName: String, key: String, prompt: String): String {
         val resolvedModel = when (modelName) {
             "gemini-2.0-flash" -> "gemini-2.5-flash"
-            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash" -> modelName
+            "gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash" -> modelName
             else -> modelName.ifBlank { "gemini-2.5-flash" }
         }
         val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=$key"
@@ -757,7 +756,7 @@ private const val ANTI_RELOAD_SCRIPT = """
     defineAlways(document, "webkitVisibilityState", "visible");
     defineAlways(document, "webkitHidden", false);
 
-    var blocked = ["visibilitychange", "webkitvisibilitychange", "blur", "pagehide", "freeze"];
+    var blocked = ["visibilitychange", "webkitvisibilitychange", "pagehide", "freeze"];
     var origAdd = EventTarget.prototype.addEventListener;
     var origDispatch = EventTarget.prototype.dispatchEvent;
 
@@ -771,10 +770,7 @@ private const val ANTI_RELOAD_SCRIPT = """
       return origDispatch.call(this, evt);
     };
 
-    window.onblur = null;
-    window.onpagehide = null;
     document.onvisibilitychange = null;
-
     Object.defineProperty(document, "hasFocus", { configurable: true, value: function () { return true; } });
 
     console.info("[Nobook] Anti-Reload guard active");
@@ -1076,7 +1072,7 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
     if (panel) panel.style.display = 'none';
     setTimeout(function() {
       window.location.href = targetUrl;
-    }, 100);
+    }, 50);
   };
 
   window.toggleNobookMenu = function() {
@@ -1149,15 +1145,15 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
 
     if (tabName === 'ai') {
       var savedKey = localStorage.getItem('nobook_ai_key') || '';
-      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini-2.5-flash';
+      var savedModel = localStorage.getItem('nobook_ai_model') || 'gemini-3.7-flash';
 
       container.innerHTML = 
         '<div style="margin-bottom: 10px; display: flex; gap: 8px;">' +
           '<select id="nb-ai-model" style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px; font-size: 13px;">' +
-            '<option value="gemini-2.5-flash"' + (savedModel === 'gemini-2.5-flash' ? ' selected' : '') + '>Google Gemini 2.5 Flash (Mới nhất, siêu nhanh)</option>' +
-            '<option value="gemini-2.5-pro"' + (savedModel === 'gemini-2.5-pro' ? ' selected' : '') + '>Google Gemini 2.5 Pro (Suy luận sâu)</option>' +
-            '<option value="gemini-1.5-flash"' + (savedModel === 'gemini-1.5-flash' ? ' selected' : '') + '>Google Gemini 1.5 Flash</option>' +
-            '<option value="gemini-1.5-pro"' + (savedModel === 'gemini-1.5-pro' ? ' selected' : '') + '>Google Gemini 1.5 Pro</option>' +
+            '<option value="gemini-3.7-flash"' + (savedModel === 'gemini-3.7-flash' ? ' selected' : '') + '>Google Gemini 3.7 Flash (Mới nhất, Trợ giúp toàn diện)</option>' +
+            '<option value="gemini-3.5-flash"' + (savedModel === 'gemini-3.5-flash' ? ' selected' : '') + '>Google Gemini 3.5 Flash-Lite (Phản hồi siêu nhanh)</option>' +
+            '<option value="gemini-3.1-pro"' + (savedModel === 'gemini-3.1-pro' ? ' selected' : '') + '>Google Gemini 3.1 Pro (Suy luận nâng cao)</option>' +
+            '<option value="gemini-2.5-flash"' + (savedModel === 'gemini-2.5-flash' ? ' selected' : '') + '>Google Gemini 2.5 Flash</option>' +
             '<option value="gpt-4o"' + (savedModel === 'gpt-4o' ? ' selected' : '') + '>OpenAI GPT-4o</option>' +
             '<option value="deepseek-chat"' + (savedModel === 'deepseek-chat' ? ' selected' : '') + '>DeepSeek V3 Chat</option>' +
             '<option value="grok-beta"' + (savedModel === 'grok-beta' ? ' selected' : '') + '>xAI Grok Beta</option>' +
@@ -1166,12 +1162,16 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
         '<div style="margin-bottom: 10px;">' +
           '<input type="password" id="nb-ai-key" value="' + savedKey + '" placeholder="Key đơn hoặc Snip xoay vòng {Key1|Key2|Key3}..." style="width: 100%; box-sizing: border-box; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 8px; padding: 8px 12px; font-size: 13px;">' +
         '</div>' +
-        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">' +
+        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;">' +
           '<button id="nb-btn-summarize" style="background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">⚡ Tóm tắt bài viết</button>' +
           '<button id="nb-btn-clean-tree" style="background: #374151; color: #fff; border: none; border-radius: 8px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer;">🧹 Lọc Text Sạch</button>' +
         '</div>' +
-        '<div id="nb-chat-logs" style="height: 230px; overflow-y: auto; background: #0c0d12; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 10px; border: 1px solid #232530;">' +
-          '<div style="color: #6b7280; text-align: center; margin-top: 80px;">Sẵn sàng trả lời & tóm tắt thông tin...</div>' +
+        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">' +
+          '<button id="nb-btn-export-cookie" style="background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px; font-weight: 600; font-size: 12px; cursor: pointer;">📤 Xuất Cookie</button>' +
+          '<button id="nb-btn-import-cookie" style="background: #d97706; color: #fff; border: none; border-radius: 8px; padding: 8px; font-weight: 600; font-size: 12px; cursor: pointer;">📥 Nhập Cookie</button>' +
+        '</div>' +
+        '<div id="nb-chat-logs" style="height: 200px; overflow-y: auto; background: #0c0d12; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 10px; border: 1px solid #232530;">' +
+          '<div style="color: #6b7280; text-align: center; margin-top: 70px;">Sẵn sàng trả lời & tóm tắt thông tin...</div>' +
         '</div>' +
         '<div style="display: flex; gap: 6px;">' +
           '<input type="text" id="nb-ai-input" placeholder="Hỏi AI bất kỳ điều gì..." style="flex: 1; background: #20232d; color: #fff; border: 1px solid #3c404d; border-radius: 20px; padding: 9px 14px; font-size: 13px; outline: none;">' +
@@ -1183,6 +1183,32 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
       };
       document.getElementById('nb-ai-key').onchange = function() {
         localStorage.setItem('nobook_ai_key', this.value.trim());
+      };
+
+      document.getElementById('nb-btn-export-cookie').onclick = function() {
+        var cookies = document.cookie || "";
+        if (!cookies) { alert("Không tìm thấy Cookie!"); return; }
+        if (window.ClipboardBridge && window.ClipboardBridge.copyText) {
+          window.ClipboardBridge.copyText(cookies);
+          alert("Đã sao chép toàn bộ Cookie vào Clipboard!");
+        } else {
+          prompt("Cookie Facebook:", cookies);
+        }
+      };
+
+      document.getElementById('nb-btn-import-cookie').onclick = function() {
+        var input = prompt("Dán chuỗi Cookie vào đây:");
+        if (input) {
+          var arr = input.split(';');
+          arr.forEach(function(c) {
+            var trimmed = c.trim();
+            if (trimmed) {
+              document.cookie = trimmed + "; path=/; domain=.facebook.com";
+            }
+          });
+          alert("Đã nạp Cookie thành công! Đang tải lại trang...");
+          window.location.reload();
+        }
       };
 
       document.getElementById('nb-btn-clean-tree').onclick = function() {
@@ -1355,7 +1381,10 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
                 '<div style="font-weight: 600; font-size: 13px; color: #e2e8f0;">' + (b.title || 'Bookmark') + ' <span style="font-size: 10px; color: ' + (isFb ? '#38bdf8' : '#a855f7') + ';">[' + (isFb ? 'Nobook' : 'Web') + ']</span></div>' +
                 '<div style="font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis;">' + b.url + '</div>' +
               '</div>' +
-              '<span style="color: #ef4444; font-size: 16px; cursor: pointer; padding: 4px;" onclick="window.deleteBookmark(' + idx + ')">&#128465;</span>' +
+              '<div style="display: flex; gap: 6px; align-items: center;">' +
+                '<span style="color: #38bdf8; font-size: 14px; cursor: pointer; padding: 4px;" onclick="window.editBookmark(' + idx + ')">✏️</span>' +
+                '<span style="color: #ef4444; font-size: 16px; cursor: pointer; padding: 4px;" onclick="window.deleteBookmark(' + idx + ')">&#128465;</span>' +
+              '</div>' +
             '</div>';
         });
       }
@@ -1374,6 +1403,17 @@ private const val ASSISTIVE_TOUCH_AND_AI_SCRIPT = """
           } else {
             window.navigateSocial(item.url);
           }
+        }
+      };
+
+      window.editBookmark = function(idx) {
+        var item = bmList[idx];
+        if (!item) return;
+        var newTitle = prompt("Chỉnh sửa tiêu đề Bookmark:", item.title);
+        if (newTitle !== null && newTitle.trim().length > 0) {
+          item.title = newTitle.trim();
+          if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+          renderTab('bookmarks');
         }
       };
 
@@ -2343,7 +2383,7 @@ private const val CONTRAST_GUARD_SCRIPT = """
             el.style.setProperty('color', '#ffffff', 'important');
             el.style.setProperty('caret-color', '#ffffff', 'important');
           }
-        } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore per-node errors */ }
       });
     }
 
@@ -2523,7 +2563,7 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
           return;
         }
 
-        if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+        if (entry.isIntersecting && entry.intersectionRatio >= 0.3) {
           if (video.hasAttribute('data-nobook-paused')) {
             video.removeAttribute('data-nobook-paused');
             video.preload = 'auto';
@@ -2613,7 +2653,7 @@ private const val MASTER_LOOP_SCRIPT = """
           console.error('[Nobook] Master Loop Error', e);
         }
       }, { timeout: 2000 });
-      setTimeout(masterNobookLoop, 1500);
+      setTimeout(masterNobookLoop, 2000);
     }
 
     masterNobookLoop();
@@ -2887,8 +2927,9 @@ fun NobookWebView(
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
+    // Hard Resource Freezing & Smooth Resume (Zero CPU in background without breaking scroll/fetch on resume)
     DisposableEffect(lifecycleOwner, state) {
-        var freezeJob: kotlinx.coroutines.Job? = null
+        var freezeJob: Job? = null
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
@@ -2898,8 +2939,9 @@ fun NobookWebView(
                         state.nativeWebView.settings.setRenderPriority(WebSettings.RenderPriority.LOW)
                         state.nativeWebView.setLayerType(View.LAYER_TYPE_NONE, null)
                     }
+                    // Đóng băng timer sau 6 phút để CPU về 0%
                     freezeJob = CoroutineScope(Dispatchers.Main).launch {
-                        delay(300000) // Đóng băng sau 5 phút để CPU về 0%
+                        delay(360000) // 6 phút
                         runCatching {
                             state.nativeWebView.pauseTimers()
                         }
@@ -2914,6 +2956,8 @@ fun NobookWebView(
                         state.nativeWebView.resumeTimers()
                         @Suppress("DEPRECATION")
                         state.nativeWebView.settings.setRenderPriority(WebSettings.RenderPriority.HIGH)
+                        // Kích hoạt đánh thức DOM event sau khi mở lại app từ nền sâu
+                        navigator.evaluateJavaScript("window.dispatchEvent(new Event('resize')); if (window.__nobookLazyLoadVideos) window.__nobookLazyLoadVideos();") {}
                     }
                 }
                 Lifecycle.Event.ON_DESTROY -> {
