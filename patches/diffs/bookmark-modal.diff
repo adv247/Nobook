@@ -1,0 +1,195 @@
+--- a/app/src/main/java/com/ycngmn/nobook/ui/screens/NobookWV.kt
++++ b/app/src/main/java/com/ycngmn/nobook/ui/screens/NobookWV.kt
+@@ -1,6 +1,134 @@
+     } else if (tabName === 'bookmarks') {
+       var rawBm = window.NobookFeaturesBridge ? window.NobookFeaturesBridge.getBookmarks() : '[]';
+       var bmList = JSON.parse(rawBm || '[]');
++
++      var BOOKMARK_MODAL_ID = 'nobook-bookmark-edit-modal';
++
++      var closeBookmarkEditModal = function () {
++        var el = document.getElementById(BOOKMARK_MODAL_ID);
++        if (el) el.remove();
++      };
++
++      var showBookmarkEditModal = function (defaultTitle, defaultUrl, onSave) {
++        closeBookmarkEditModal();
++
++        var overlay = document.createElement('div');
++        overlay.id = BOOKMARK_MODAL_ID;
++        overlay.style.cssText =
++          'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000001;' +
++          'display:flex;align-items:center;justify-content:center;';
++        overlay.addEventListener('click', function (e) { if (e.target === overlay) closeBookmarkEditModal(); });
++
++        var box = document.createElement('div');
++        box.style.cssText =
++          'background:#1c1c1e;color:#fff;border-radius:14px;padding:18px;' +
++          'max-width:340px;width:88%;box-shadow:0 8px 24px rgba(0,0,0,0.5);' +
++          'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
++
++        var titleEl = document.createElement('div');
++        titleEl.textContent = 'Chỉnh sửa Bookmark';
++        titleEl.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:14px;';
++
++        var titleInput = document.createElement('input');
++        titleInput.type = 'text';
++        titleInput.value = defaultTitle || '';
++        titleInput.placeholder = 'Tiêu đề';
++        titleInput.style.cssText =
++          'width:100%;box-sizing:border-box;background:#12141a;color:#fff;' +
++          'border:1px solid #3c404d;border-radius:8px;padding:9px 12px;font-size:13px;margin-bottom:8px;';
++
++        var urlInput = document.createElement('input');
++        urlInput.type = 'text';
++        urlInput.value = defaultUrl || '';
++        urlInput.placeholder = 'Đường dẫn (URL)';
++        urlInput.style.cssText =
++          'width:100%;box-sizing:border-box;background:#12141a;color:#fff;' +
++          'border:1px solid #3c404d;border-radius:8px;padding:9px 12px;font-size:13px;margin-bottom:14px;';
++
++        var btnRow = document.createElement('div');
++        btnRow.style.cssText = 'display:flex;gap:8px;';
++
++        var cancelBtn = document.createElement('button');
++        cancelBtn.textContent = 'Hủy';
++        cancelBtn.style.cssText =
++          'flex:1;background:#3a3a3c;color:#fff;border:none;border-radius:8px;' +
++          'padding:10px;font-weight:600;font-size:13px;cursor:pointer;';
++        cancelBtn.addEventListener('click', closeBookmarkEditModal);
++
++        var saveBtn = document.createElement('button');
++        saveBtn.textContent = 'Lưu';
++        saveBtn.style.cssText =
++          'flex:1;background:#2563eb;color:#fff;border:none;border-radius:8px;' +
++          'padding:10px;font-weight:600;font-size:13px;cursor:pointer;';
++        saveBtn.addEventListener('click', function () {
++          var newTitle = titleInput.value.trim();
++          var newUrl = urlInput.value.trim();
++          if (!newUrl) { alert('Vui lòng nhập URL!'); return; }
++          closeBookmarkEditModal();
++          onSave(newTitle || newUrl, newUrl);
++        });
++
++        btnRow.appendChild(cancelBtn);
++        btnRow.appendChild(saveBtn);
++        box.appendChild(titleEl);
++        box.appendChild(titleInput);
++        box.appendChild(urlInput);
++        box.appendChild(btnRow);
++        overlay.appendChild(box);
++        document.body.appendChild(overlay);
++
++        titleInput.focus();
++      };
++
++      var showConfirmModal = function (message, onConfirm, onCancel) {
++        closeBookmarkEditModal();
++
++        var overlay = document.createElement('div');
++        overlay.id = BOOKMARK_MODAL_ID;
++        overlay.style.cssText =
++          'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000001;' +
++          'display:flex;align-items:center;justify-content:center;';
++
++        var box = document.createElement('div');
++        box.style.cssText =
++          'background:#1c1c1e;color:#fff;border-radius:14px;padding:18px;' +
++          'max-width:300px;width:85%;box-shadow:0 8px 24px rgba(0,0,0,0.5);' +
++          'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
++
++        var msg = document.createElement('div');
++        msg.textContent = message;
++        msg.style.cssText = 'font-size:14px;margin-bottom:16px;line-height:1.4;';
++
++        var btnRow = document.createElement('div');
++        btnRow.style.cssText = 'display:flex;gap:8px;';
++
++        var noBtn = document.createElement('button');
++        noBtn.textContent = 'Không';
++        noBtn.style.cssText =
++          'flex:1;background:#3a3a3c;color:#fff;border:none;border-radius:8px;' +
++          'padding:10px;font-weight:600;font-size:13px;cursor:pointer;';
++        noBtn.addEventListener('click', function () {
++          closeBookmarkEditModal();
++          if (onCancel) onCancel();
++        });
++
++        var yesBtn = document.createElement('button');
++        yesBtn.textContent = 'Đồng ý';
++        yesBtn.style.cssText =
++          'flex:1;background:#2563eb;color:#fff;border:none;border-radius:8px;' +
++          'padding:10px;font-weight:600;font-size:13px;cursor:pointer;';
++        yesBtn.addEventListener('click', function () {
++          closeBookmarkEditModal();
++          onConfirm();
++        });
++
++        btnRow.appendChild(noBtn);
++        btnRow.appendChild(yesBtn);
++        box.appendChild(msg);
++        box.appendChild(btnRow);
++        overlay.appendChild(box);
++        document.body.appendChild(overlay);
++      };
++
+       var html = 
+         '<div style="background: #20232d; padding: 12px; border-radius: 10px; margin-bottom: 12px;">' +
+           '<div style="font-size: 12px; font-weight: bold; margin-bottom: 6px;">Thêm Bookmark Thủ Công:</div>' +
+@@ -49,11 +177,13 @@
+         if (isFb) {
+           window.navigateSocial(item.url);
+         } else {
+-          if (confirm("Mở link này trong trình duyệt ngoài?")) {
+-            if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.openExternalUrl(item.url);
+-          } else {
+-            window.navigateSocial(item.url);
+-          }
++          showConfirmModal(
++            "Mở link này trong trình duyệt ngoài?",
++            function () {
++              if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.openExternalUrl(item.url);
++            },
++            function () {
++              window.navigateSocial(item.url);
++            }
++          );
+         }
+       };
+ 
+       window.editBookmark = function(idx) {
+         var item = bmList[idx];
+         if (!item) return;
+-        var newTitle = prompt("Chỉnh sửa tiêu đề Bookmark:", item.title);
+-        if (newTitle !== null && newTitle.trim().length > 0) {
+-          item.title = newTitle.trim();
+-          if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+-          renderTab('bookmarks');
+-        }
++        showBookmarkEditModal(item.title, item.url, function (newTitle, newUrl) {
++          item.title = newTitle;
++          item.url = newUrl;
++          if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
++          renderTab('bookmarks');
++        });
+       };
+ 
+       window.deleteBookmark = function(idx) {
+@@ -73,12 +203,11 @@
+       };
+ 
+       document.getElementById('nb-add-bookmark').onclick = function() {
+-        var t = prompt("Nhập tiêu đề Bookmark:", document.title || "Bài viết FB");
+-        if (t === null) return;
+-        var u = window.location.href;
+-        bmList.unshift({ title: t || document.title, url: u, time: Date.now() });
+-        if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
+-        renderTab('bookmarks');
++        showBookmarkEditModal(document.title || "Bài viết FB", window.location.href, function (newTitle, newUrl) {
++          bmList.unshift({ title: newTitle, url: newUrl, time: Date.now() });
++          if (window.NobookFeaturesBridge) window.NobookFeaturesBridge.saveBookmarks(JSON.stringify(bmList));
++          renderTab('bookmarks');
++        });
+       };
+ 
+       document.getElementById('nb-clean-duplicates').onclick = function() {

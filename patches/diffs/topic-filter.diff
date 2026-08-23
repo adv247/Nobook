@@ -1,0 +1,91 @@
+--- a/app/src/main/java/com/ycngmn/nobook/ui/screens/NobookWV.kt
++++ b/app/src/main/java/com/ycngmn/nobook/ui/screens/NobookWV.kt
+@@ -20,19 +20,63 @@
+       });
+     };
+ 
++    var SUGGESTED_LABEL_HINTS = [
++      'gợi ý cho bạn', 'suggested for you', 'chủ đề liên quan', 'related topics',
++      'bài viết bạn có thể thích', 'tham gia nhóm', 'suggested group', 'suggested groups',
++      'more from', 'people you may know', 'reels được đề xuất', 'suggested reels'
++    ];
++
++    var isSuggestedLabel = function (text) {
++      var norm = normalize(text);
++      return SUGGESTED_LABEL_HINTS.some(function (hint) { return norm.indexOf(hint) !== -1; });
++    };
++
++    var CONTAINER_SELECTORS = [
++      'div[role="article"]',
++      'div[data-pagelet^="FeedUnit"]',
++      'div[data-pagelet*="Browse"]',
++      'div[data-sigil*="feed-story"]',
++      'div.story_body_container',
++      'div[aria-label*="reel" i]',
++      'div[data-pagelet*="GroupSuggestion"]',
++      'div[data-pagelet*="Suggestion"]'
++    ];
++
++    function collectFullText(container) {
++      var parts = [container.innerText || ''];
++      var labelNodes = container.querySelectorAll('[aria-label], span, h3, h4');
++      for (var i = 0; i < labelNodes.length; i++) {
++        var n = labelNodes[i];
++        var al = n.getAttribute ? (n.getAttribute('aria-label') || '') : '';
++        if (al) parts.push(al);
++      }
++      return parts.join(' \n ');
++    }
++
+     var filterFeed = function () {
+       var keywords = getActiveKeywords();
+-      if (!keywords || keywords.length === 0) return;
+ 
+-      document.querySelectorAll('div[role="article"], div[data-pagelet^="FeedUnit"]').forEach(function (post) {
+-        var text = post.innerText || '';
+-        if (matchesKeyword(text, keywords)) {
+-          post.style.display = 'none';
+-          post.setAttribute('data-nobook-keyword-filtered', '1');
+-        }
++      CONTAINER_SELECTORS.forEach(function (selector) {
++        document.querySelectorAll(selector).forEach(function (post) {
++          if (post.hasAttribute('data-nobook-keyword-filtered')) return;
++
++          var fullText = collectFullText(post);
++          var hitsUserKeyword = matchesKeyword(fullText, keywords);
++          var hitsSuggestedLabel = isSuggestedLabel(fullText) && matchesKeyword(fullText, keywords);
++
++          if (hitsUserKeyword || hitsSuggestedLabel) {
++            post.style.setProperty('display', 'none', 'important');
++            post.setAttribute('data-nobook-keyword-filtered', '1');
++          }
++        });
+       });
+     };
+ 
+-    filterFeed();
+-    var observer = new MutationObserver(function () { filterFeed(); });
++    var ric = window.requestIdleCallback || function (cb) {
++      return setTimeout(function () { cb({ timeRemaining: function () { return 1; }, didTimeout: false }); }, 1);
++    };
++    var pending = false;
++    var scheduleFilter = function () {
++      if (pending) return;
++      pending = true;
++      ric(function () {
++        pending = false;
++        filterFeed();
++      }, { timeout: 1000 });
++    };
++
++    scheduleFilter();
++    var observer = new MutationObserver(function () { scheduleFilter(); });
+     observer.observe(document.body, { childList: true, subtree: true });
+ 
+-    console.info('[Nobook] Dynamic Topic keyword filter active');
++    window.__nobookRefilterTopics = scheduleFilter;
++
++    console.info('[Nobook] Dynamic Topic keyword filter active (mở rộng: suggested/related/reels/group)');
+   } catch (err) {
+     console.error('[Nobook] Topic keyword filter injection failed:', err);
+   }
