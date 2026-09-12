@@ -2676,8 +2676,8 @@ private const val FB_TIME_MANAGER_SCRIPT = """
     window.__nobookTimeManagerActive = true;
 
     var STORAGE_KEY = 'nobook_daily_usage_v1';
-    var INTERVAL_MS = 60000; // tick moi 1 phut
-    var WARN_BEFORE_MIN = 2; // hien badge 2 phut truoc moc
+    var INTERVAL_MS = 60000;
+    var WARN_BEFORE_MIN = 2;
 
     function todayKey() {
       var d = new Date();
@@ -2703,10 +2703,6 @@ private const val FB_TIME_MANAGER_SCRIPT = """
     var usage = loadUsage();
     var lastAckMilestone = 0;
 
-    // Cac moc nghi ngoi: 30, 60, 90, 120, ... (moi 30 phut)
-    function nextMilestone(minutes) {
-      return (Math.floor(minutes / 30) + 1) * 30;
-    }
     function currentMilestoneWindowStart(minutes) {
       return Math.floor(minutes / 30) * 30;
     }
@@ -2786,7 +2782,6 @@ private const val FB_TIME_MANAGER_SCRIPT = """
       overlay.appendChild(box);
       document.body.appendChild(overlay);
 
-      // Tu bien mat sau 6s neu nguoi dung khong bam
       setTimeout(closeModal, 6000);
     }
 
@@ -2797,7 +2792,7 @@ private const val FB_TIME_MANAGER_SCRIPT = """
       var m = usage.minutes;
       var windowStart = currentMilestoneWindowStart(m);
       var nextMile = windowStart === 0 ? 30 : windowStart + 30;
-      // truong hop dung moc chinh xac
+
       if (m % 30 === 0 && m > 0) {
         if (lastAckMilestone !== m) {
           lastAckMilestone = m;
@@ -2815,7 +2810,6 @@ private const val FB_TIME_MANAGER_SCRIPT = """
       }
     }
 
-    // Chay ngay 1 lan de kiem tra trang thai hien tai khi vao trang
     (function initialCheck() {
       var m = usage.minutes;
       var windowStart = currentMilestoneWindowStart(m);
@@ -3130,6 +3124,11 @@ fun NobookWebView(
         state.nativeWebView.settings.userAgentString = userAgent
     }
 
+    var isUserCalling by remember { mutableStateOf(false) }
+    var isUploadIntent by remember { mutableStateOf(false) }
+    val callStateBridgeRef = remember { mutableStateOf<CallStateBridge?>(null) }
+    val uploadStateBridgeRef = remember { mutableStateOf<UploadStateBridge?>(null) }
+
     // Hard Resource Freezing & Smooth Resume (Zero CPU in background without breaking scroll/fetch on resume)
     DisposableEffect(lifecycleOwner, state) {
         var freezeJob: Job? = null
@@ -3199,11 +3198,6 @@ fun NobookWebView(
         }
         onDispose { VideoPlaybackBridge.onPlaybackChanged = null }
     }
-
-    var isUserCalling by remember { mutableStateOf(false) }
-    var isUploadIntent by remember { mutableStateOf(false) }
-    val callStateBridgeRef = remember { mutableStateOf<CallStateBridge?>(null) }
-    val uploadStateBridgeRef = remember { mutableStateOf<UploadStateBridge?>(null) }
 
     val barsInsets = WindowInsets.systemBars.asPaddingValues()
     val imeHeight = rememberImeHeight()
