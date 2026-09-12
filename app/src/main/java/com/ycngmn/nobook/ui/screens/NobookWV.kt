@@ -270,11 +270,30 @@ private object VideoPlaybackBridge {
  */
 private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var expiryRunnable: Runnable? = null
+    private val CALL_INTENT_TTL_MS = 35_000L
 
     @JavascriptInterface
     fun notifyCallIntent(isCalling: Boolean) {
         mainHandler.post {
+            expiryRunnable?.let { mainHandler.removeCallbacks(it) }
+            expiryRunnable = null
             runCatching { onCallStateChanged(isCalling) }
+            if (isCalling) {
+                val runnable = Runnable {
+                    runCatching { onCallStateChanged(false) }
+                }
+                expiryRunnable = runnable
+                mainHandler.postDelayed(runnable, CALL_INTENT_TTL_MS)
+            }
+        }
+    }
+
+    fun forceExpire() {
+        mainHandler.post {
+            expiryRunnable?.let { mainHandler.removeCallbacks(it) }
+            expiryRunnable = null
+            runCatching { onCallStateChanged(false) }
         }
     }
 }
@@ -284,11 +303,26 @@ private class CallStateBridge(private val onCallStateChanged: (Boolean) -> Unit)
  */
 private class UploadStateBridge(private val onUploadIntentChanged: (Boolean) -> Unit) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var expiryRunnable: Runnable? = null
+    private val UPLOAD_INTENT_TTL_MS = 8_000L
 
     @JavascriptInterface
     fun notifyUploadIntent() {
         mainHandler.post {
+            expiryRunnable?.let { mainHandler.removeCallbacks(it) }
             runCatching { onUploadIntentChanged(true) }
+            val runnable = Runnable {
+                runCatching { onUploadIntentChanged(false) }
+            }
+            expiryRunnable = runnable
+            mainHandler.postDelayed(runnable, UPLOAD_INTENT_TTL_MS)
+        }
+    }
+
+    fun cancelPendingExpiry() {
+        mainHandler.post {
+            expiryRunnable?.let { mainHandler.removeCallbacks(it) }
+            expiryRunnable = null
         }
     }
 }
@@ -689,7 +723,8 @@ private val TRUSTED_WEBRTC_ORIGINS = setOf(
 private fun createSecureWebChromeClient(
     getCallState: () -> Boolean,
     getUploadState: () -> Boolean,
-    resetUploadState: () -> Unit
+    resetUploadState: () -> Unit,
+    onUploadConsumed: () -> Unit
 ): WebChromeClient {
     return object : WebChromeClient() {
         override fun onPermissionRequest(request: PermissionRequest) {
@@ -730,6 +765,7 @@ private fun createSecureWebChromeClient(
                 return true
             }
             resetUploadState()
+            onUploadConsumed()
             return false 
         }
     }
@@ -2933,6 +2969,9 @@ fun NobookWebView(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
+                    callStateBridgeRef.value?.forceExpire()
+                    isUploadIntent = false
+
                     runCatching {
                         state.nativeWebView.onPause()
                         @Suppress("DEPRECATION")
@@ -2996,6 +3035,8 @@ fun NobookWebView(
 
     var isUserCalling by remember { mutableStateOf(false) }
     var isUploadIntent by remember { mutableStateOf(false) }
+    val callStateBridgeRef = remember { mutableStateOf<CallStateBridge?>(null) }
+    val uploadStateBridgeRef = remember { mutableStateOf<UploadStateBridge?>(null) }
 
     val barsInsets = WindowInsets.systemBars.asPaddingValues()
     val imeHeight = rememberImeHeight()
@@ -3025,7 +3066,8 @@ fun NobookWebView(
             webView.webChromeClient = createSecureWebChromeClient(
                 getCallState = { isUserCalling },
                 getUploadState = { isUploadIntent },
-                resetUploadState = { isUploadIntent = false }
+                resetUploadState = { isUploadIntent = false },
+                onUploadConsumed = { uploadStateBridgeRef.value?.cancelPendingExpiry() }
             )
 
             val cookieManager = CookieManager.getInstance()
@@ -3070,11 +3112,11 @@ fun NobookWebView(
                     "NobookVideoBridge"
                 )
                 addJavascriptInterface(
-                    CallStateBridge { isCalling -> isUserCalling = isCalling },
+                    CallStateBridge { isCalling -> isUserCalling = isCalling }.also { callStateBridgeRef.value = it },
                     "CallStateBridge"
                 )
                 addJavascriptInterface(
-                    UploadStateBridge { intent -> isUploadIntent = intent },
+                    UploadStateBridge { intent -> isUploadIntent = intent }.also { uploadStateBridgeRef.value = it },
                     "UploadStateBridge"
                 )
                 addJavascriptInterface(
