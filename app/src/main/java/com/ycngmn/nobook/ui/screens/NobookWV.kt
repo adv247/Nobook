@@ -2669,6 +2669,172 @@ private const val PERFORMANCE_OPTIMIZATION_SCRIPT = """
 })();
 """
 
+private const val FB_TIME_MANAGER_SCRIPT = """
+(function () {
+  try {
+    if (window.__nobookTimeManagerActive) return;
+    window.__nobookTimeManagerActive = true;
+
+    var STORAGE_KEY = 'nobook_daily_usage_v1';
+    var INTERVAL_MS = 60000; // tick moi 1 phut
+    var WARN_BEFORE_MIN = 2; // hien badge 2 phut truoc moc
+
+    function todayKey() {
+      var d = new Date();
+      return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+    }
+
+    function loadUsage() {
+      try {
+        var raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return { date: todayKey(), minutes: 0 };
+        var obj = JSON.parse(raw);
+        if (obj.date !== todayKey()) return { date: todayKey(), minutes: 0 };
+        return obj;
+      } catch (e) {
+        return { date: todayKey(), minutes: 0 };
+      }
+    }
+
+    function saveUsage(obj) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); } catch (e) {}
+    }
+
+    var usage = loadUsage();
+    var lastAckMilestone = 0;
+
+    // Cac moc nghi ngoi: 30, 60, 90, 120, ... (moi 30 phut)
+    function nextMilestone(minutes) {
+      return (Math.floor(minutes / 30) + 1) * 30;
+    }
+    function currentMilestoneWindowStart(minutes) {
+      return Math.floor(minutes / 30) * 30;
+    }
+
+    var BADGE_ID = 'nobook-fb-timer-badge';
+    var MODAL_ID = 'nobook-fb-timer-modal';
+
+    function ensureBadge() {
+      var el = document.getElementById(BADGE_ID);
+      if (el) return el;
+      el = document.createElement('div');
+      el.id = BADGE_ID;
+      el.style.cssText =
+        'position:fixed;top:6px;right:6px;z-index:999997;' +
+        'font-size:10px;line-height:1;padding:2px 5px;border-radius:8px;' +
+        'background:rgba(0,0,0,0.55);color:#fff;font-family:sans-serif;' +
+        'pointer-events:none;opacity:0;transition:opacity 0.25s ease;' +
+        'user-select:none;-webkit-user-select:none;';
+      document.body.appendChild(el);
+      return el;
+    }
+
+    function showBadge(text) {
+      var el = ensureBadge();
+      el.textContent = text;
+      el.style.opacity = '1';
+    }
+
+    function hideBadge() {
+      var el = document.getElementById(BADGE_ID);
+      if (el) el.style.opacity = '0';
+    }
+
+    function closeModal() {
+      var el = document.getElementById(MODAL_ID);
+      if (el) el.remove();
+    }
+
+    function showRestModal(totalMinutes) {
+      closeModal();
+      var overlay = document.createElement('div');
+      overlay.id = MODAL_ID;
+      overlay.style.cssText =
+        'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:999999;' +
+        'display:flex;align-items:center;justify-content:center;';
+      overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
+
+      var box = document.createElement('div');
+      box.style.cssText =
+        'background:#1c1c1e;color:#fff;border-radius:16px;padding:22px;' +
+        'max-width:300px;width:85%;text-align:center;' +
+        'box-shadow:0 8px 24px rgba(0,0,0,0.5);font-family:sans-serif;';
+
+      var icon = document.createElement('div');
+      icon.textContent = '\\u{1F440}';
+      icon.style.cssText = 'font-size:34px;margin-bottom:10px;';
+
+      var title = document.createElement('div');
+      title.textContent = 'Da luot ' + totalMinutes + ' phut';
+      title.style.cssText = 'font-size:16px;font-weight:700;margin-bottom:6px;';
+
+      var desc = document.createElement('div');
+      desc.textContent = 'Nghi mat 20 giay, nhin xa 6m de bao ve mat nhe.';
+      desc.style.cssText = 'font-size:13px;color:#aaa;margin-bottom:16px;';
+
+      var btn = document.createElement('button');
+      btn.textContent = 'Da hieu, tiep tuc';
+      btn.style.cssText =
+        'width:100%;padding:11px;border:none;border-radius:10px;' +
+        'background:rgba(24,119,242,0.95);color:#fff;font-size:14px;font-weight:600;cursor:pointer;';
+      btn.addEventListener('click', function () { closeModal(); });
+
+      box.appendChild(icon);
+      box.appendChild(title);
+      box.appendChild(desc);
+      box.appendChild(btn);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+
+      // Tu bien mat sau 6s neu nguoi dung khong bam
+      setTimeout(closeModal, 6000);
+    }
+
+    function tick() {
+      usage.minutes += 1;
+      saveUsage(usage);
+
+      var m = usage.minutes;
+      var windowStart = currentMilestoneWindowStart(m);
+      var nextMile = windowStart === 0 ? 30 : windowStart + 30;
+      // truong hop dung moc chinh xac
+      if (m % 30 === 0 && m > 0) {
+        if (lastAckMilestone !== m) {
+          lastAckMilestone = m;
+          showRestModal(m);
+          hideBadge();
+        }
+        return;
+      }
+
+      var minutesToNextMile = nextMile - m;
+      if (minutesToNextMile <= WARN_BEFORE_MIN && minutesToNextMile > 0) {
+        showBadge(minutesToNextMile + 'p');
+      } else {
+        hideBadge();
+      }
+    }
+
+    // Chay ngay 1 lan de kiem tra trang thai hien tai khi vao trang
+    (function initialCheck() {
+      var m = usage.minutes;
+      var windowStart = currentMilestoneWindowStart(m);
+      var nextMile = windowStart === 0 ? 30 : windowStart + 30;
+      var minutesToNextMile = nextMile - m;
+      if (minutesToNextMile <= WARN_BEFORE_MIN && minutesToNextMile > 0) {
+        showBadge(minutesToNextMile + 'p');
+      }
+    })();
+
+    setInterval(tick, INTERVAL_MS);
+
+    console.info('[Nobook] FB Time Manager active (invisible badge, 30-min rest reminders)');
+  } catch (err) {
+    console.error('[Nobook] FB Time Manager injection failed:', err);
+  }
+})();
+"""
+
 private const val MASTER_LOOP_SCRIPT = """
 (function () {
   try {
@@ -2891,6 +3057,7 @@ fun NobookWebView(
             navigator.evaluateJavaScript(MASTER_LOOP_SCRIPT) {}
             navigator.evaluateJavaScript(NETWORK_SANITIZER_AND_PRIVACY_SCRIPT) {}
             navigator.evaluateJavaScript(ASSISTIVE_TOUCH_AND_AI_SCRIPT) {}
+            navigator.evaluateJavaScript(FB_TIME_MANAGER_SCRIPT) {}
         }
     }
 
