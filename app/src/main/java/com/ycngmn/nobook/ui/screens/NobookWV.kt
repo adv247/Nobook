@@ -2675,9 +2675,8 @@ private const val FB_TIME_MANAGER_SCRIPT = """
     if (window.__nobookTimeManagerActive) return;
     window.__nobookTimeManagerActive = true;
 
-    var STORAGE_KEY = 'nobook_daily_usage_v1';
-    var INTERVAL_MS = 60000;
-    var WARN_BEFORE_MIN = 2;
+    var STORAGE_KEY = 'nobook_daily_usage_v2';
+    var INTERVAL_MS = 60000; // 1 phut kiem tra 1 lan
 
     function todayKey() {
       var d = new Date();
@@ -2701,10 +2700,37 @@ private const val FB_TIME_MANAGER_SCRIPT = """
     }
 
     var usage = loadUsage();
-    var lastAckMilestone = 0;
+    var lastAckMilestone = -1;
 
-    function currentMilestoneWindowStart(minutes) {
-      return Math.floor(minutes / 30) * 30;
+    function getFacebookUserName() {
+      try {
+        var commentEls = document.querySelectorAll('[aria-label*="Bình luận dưới tên" i], [aria-label*="Comment as" i], [placeholder*="Bình luận dưới tên" i]');
+        for (var i = 0; i < commentEls.length; i++) {
+          var label = commentEls[i].getAttribute('aria-label') || commentEls[i].getAttribute('placeholder') || '';
+          var match = label.match(/(?:dưới tên|Comment as)\s+([^.,\n\r]+)/i);
+          if (match && match[1] && match[1].trim()) return match[1].trim();
+        }
+
+        var spans = document.querySelectorAll('span, div');
+        for (var j = 0; j < spans.length; j++) {
+          var txt = spans[j].textContent || '';
+          if (txt.indexOf('Bình luận dưới tên ') !== -1) {
+            var parts = txt.split('Bình luận dưới tên ');
+            if (parts[1]) {
+              var cleanName = parts[1].split(/[\n\r\t]/)[0].trim();
+              if (cleanName.length >= 2 && cleanName.length <= 30) return cleanName;
+            }
+          }
+        }
+
+        var profileAnchor = document.querySelector('a[href*="/me/"], a[aria-label*="Trang cá nhân" i], div[aria-label*="Trang cá nhân" i]');
+        if (profileAnchor) {
+          var alt = profileAnchor.getAttribute('aria-label') || profileAnchor.innerText || '';
+          var clean = alt.replace(/Trang cá nhân của|Trang cá nhân/gi, '').trim();
+          if (clean.length >= 2 && clean.length <= 30) return clean;
+        }
+      } catch(e) {}
+      return "";
     }
 
     var BADGE_ID = 'nobook-fb-timer-badge';
@@ -2716,11 +2742,13 @@ private const val FB_TIME_MANAGER_SCRIPT = """
       el = document.createElement('div');
       el.id = BADGE_ID;
       el.style.cssText =
-        'position:fixed;top:6px;right:6px;z-index:999997;' +
-        'font-size:10px;line-height:1;padding:2px 5px;border-radius:8px;' +
-        'background:rgba(0,0,0,0.55);color:#fff;font-family:sans-serif;' +
-        'pointer-events:none;opacity:0;transition:opacity 0.25s ease;' +
-        'user-select:none;-webkit-user-select:none;';
+        'position:fixed;top:10px;right:12px;z-index:999997;' +
+        'font-size:10px;font-weight:600;line-height:1;padding:3px 7px;border-radius:10px;' +
+        'background:rgba(20, 20, 24, 0.72);color:#e4e6eb;border:0.5px solid rgba(255,255,255,0.15);' +
+        'backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);' +
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;' +
+        'pointer-events:none;opacity:0;display:none;transition:opacity 0.3s ease;' +
+        'user-select:none;-webkit-user-select:none;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
       document.body.appendChild(el);
       return el;
     }
@@ -2728,12 +2756,16 @@ private const val FB_TIME_MANAGER_SCRIPT = """
     function showBadge(text) {
       var el = ensureBadge();
       el.textContent = text;
-      el.style.opacity = '1';
+      el.style.display = 'block';
+      setTimeout(function() { el.style.opacity = '1'; }, 10);
     }
 
     function hideBadge() {
       var el = document.getElementById(BADGE_ID);
-      if (el) el.style.opacity = '0';
+      if (el) {
+        el.style.opacity = '0';
+        setTimeout(function() { el.style.display = 'none'; }, 300);
+      }
     }
 
     function closeModal() {
@@ -2743,37 +2775,44 @@ private const val FB_TIME_MANAGER_SCRIPT = """
 
     function showRestModal(totalMinutes) {
       closeModal();
+      hideBadge();
+
+      var userName = getFacebookUserName();
+      var displayName = userName ? userName : 'bạn';
+
       var overlay = document.createElement('div');
       overlay.id = MODAL_ID;
       overlay.style.cssText =
-        'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:999999;' +
-        'display:flex;align-items:center;justify-content:center;';
-      overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
+        'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;' +
+        'display:flex;align-items:center;justify-content:center;' +
+        'backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);';
 
       var box = document.createElement('div');
       box.style.cssText =
-        'background:#1c1c1e;color:#fff;border-radius:16px;padding:22px;' +
-        'max-width:300px;width:85%;text-align:center;' +
-        'box-shadow:0 8px 24px rgba(0,0,0,0.5);font-family:sans-serif;';
+        'background:#242526;color:#e4e6eb;border-radius:20px;padding:26px 20px 22px 20px;' +
+        'max-width:320px;width:86%;text-align:center;' +
+        'box-shadow:0 16px 40px rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.08);' +
+        'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;';
 
       var icon = document.createElement('div');
-      icon.textContent = '\\u{1F440}';
-      icon.style.cssText = 'font-size:34px;margin-bottom:10px;';
+      icon.innerHTML = '&#9203;';
+      icon.style.cssText = 'font-size:48px;line-height:1;margin-bottom:14px;';
 
       var title = document.createElement('div');
-      title.textContent = 'Da luot ' + totalMinutes + ' phut';
-      title.style.cssText = 'font-size:16px;font-weight:700;margin-bottom:6px;';
+      title.textContent = 'Nghỉ ngơi mắt nhé, ' + displayName + '!';
+      title.style.cssText = 'font-size:18px;font-weight:700;color:#ffffff;margin-bottom:10px;letter-spacing:-0.2px;';
 
       var desc = document.createElement('div');
-      desc.textContent = 'Nghi mat 20 giay, nhin xa 6m de bao ve mat nhe.';
-      desc.style.cssText = 'font-size:13px;color:#aaa;margin-bottom:16px;';
+      desc.textContent = 'Bạn đã lướt Facebook liên tục ' + totalMinutes + ' phút.';
+      desc.style.cssText = 'font-size:14px;color:#b0b3b8;margin-bottom:22px;line-height:1.45;';
 
       var btn = document.createElement('button');
-      btn.textContent = 'Da hieu, tiep tuc';
+      btn.textContent = 'Đã hiểu';
       btn.style.cssText =
-        'width:100%;padding:11px;border:none;border-radius:10px;' +
-        'background:rgba(24,119,242,0.95);color:#fff;font-size:14px;font-weight:600;cursor:pointer;';
-      btn.addEventListener('click', function () { closeModal(); });
+        'width:100%;padding:12px 0;border:none;border-radius:12px;' +
+        'background:#1877F2;color:#ffffff;font-size:15px;font-weight:600;' +
+        'cursor:pointer;outline:none;transition:background 0.2s ease;';
+      btn.onclick = function () { closeModal(); };
 
       box.appendChild(icon);
       box.appendChild(title);
@@ -2782,47 +2821,45 @@ private const val FB_TIME_MANAGER_SCRIPT = """
       overlay.appendChild(box);
       document.body.appendChild(overlay);
 
-      setTimeout(closeModal, 6000);
+      setTimeout(closeModal, 8000);
     }
 
-    function tick() {
-      usage.minutes += 1;
-      saveUsage(usage);
-
+    function evaluateTimerVisibility() {
       var m = usage.minutes;
-      var windowStart = currentMilestoneWindowStart(m);
-      var nextMile = windowStart === 0 ? 30 : windowStart + 30;
-
-      if (m % 30 === 0 && m > 0) {
-        if (lastAckMilestone !== m) {
-          lastAckMilestone = m;
-          showRestModal(m);
-          hideBadge();
-        }
+      if (m <= 0) {
+        hideBadge();
         return;
       }
 
-      var minutesToNextMile = nextMile - m;
-      if (minutesToNextMile <= WARN_BEFORE_MIN && minutesToNextMile > 0) {
-        showBadge(minutesToNextMile + 'p');
+      var nextMilestone = Math.ceil((m + 0.01) / 30) * 30;
+      var remain = nextMilestone - m;
+
+      if (m % 30 === 0) {
+        if (lastAckMilestone !== m) {
+          lastAckMilestone = m;
+          showRestModal(m);
+        }
+        hideBadge();
+        return;
+      }
+
+      if (remain <= 2 && remain > 0) {
+        showBadge(m + 'm');
       } else {
         hideBadge();
       }
     }
 
-    (function initialCheck() {
-      var m = usage.minutes;
-      var windowStart = currentMilestoneWindowStart(m);
-      var nextMile = windowStart === 0 ? 30 : windowStart + 30;
-      var minutesToNextMile = nextMile - m;
-      if (minutesToNextMile <= WARN_BEFORE_MIN && minutesToNextMile > 0) {
-        showBadge(minutesToNextMile + 'p');
-      }
-    })();
+    function tick() {
+      usage.minutes += 1;
+      saveUsage(usage);
+      evaluateTimerVisibility();
+    }
 
+    evaluateTimerVisibility();
     setInterval(tick, INTERVAL_MS);
 
-    console.info('[Nobook] FB Time Manager active (invisible badge, 30-min rest reminders)');
+    console.info('[Nobook] FB Stealth Timer (10px, Top-Right, Calmer Feed) Active.');
   } catch (err) {
     console.error('[Nobook] FB Time Manager injection failed:', err);
   }
